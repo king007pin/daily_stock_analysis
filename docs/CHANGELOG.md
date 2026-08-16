@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 支持印度股票市场（NSE .NS 与 BSE .BO），包括交易日历（XBOM/Asia/Kolkata）、行情获取、大盘复盘（Nifty 50/Sensex）、新闻检索与 LLM 分析上下文。
 - [新功能] 集成 Kronos 金融时间序列大模型（AAAI 2026）与量化预测引擎，支持未来 K 线走势预测、波动率锥与量化动量交易设置，并提供本地 PyTorch、Sidecar API 与确定性量化引擎自适应降级。
 - [文档] 将项目主文档 README.md 升级为完整英文版，增加印度股票市场（NSE/BSE）指引，并更新 .env.example 默认语言与英文注释。
+- [文档] 升级项目主视觉与品牌为 DAILY QUANTS，涵盖多市场 AI 决策与 Kronos 时间序列量化预测能力。
 
 ## [3.30.0] - 2026-08-09
 

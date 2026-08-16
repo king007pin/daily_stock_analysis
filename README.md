@@ -1,6 +1,7 @@
 <div align="center">
 
-# AI Stock Analysis System
+# 📈 DAILY QUANTS
+### Multi-Market AI & Quantitative Financial Forecasting Platform
 
 [![GitHub stars](https://img.shields.io/github/stars/king007pin/daily_stock_analysis?style=social)](https://github.com/king007pin/daily_stock_analysis/stargazers)
 [![CI](https://github.com/king007pin/daily_stock_analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/king007pin/daily_stock_analysis/actions/workflows/ci.yml)
@@ -13,8 +14,8 @@
   <img src="https://trendshift.io/api/badge/trendshift/repositories/18527/daily?language=Python" alt="#1 Python Repository Of The Day | Trendshift" width="250" height="55"/>&nbsp;<a href="https://hellogithub.com/repository/ZhuLinsen/daily_stock_analysis" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=6daa16e405ce46ed97b4a57706aeb29f&claim_uid=pfiJMqhR9uvDGlT&theme=neutral" alt="Featured｜HelloGitHub" width="230" /></a>
 </p>
 
-> 🤖 **AI-powered stock analysis system for Indian Stock Market (NSE / BSE), US, Hong Kong, China A-shares, Japan, Korea, and Taiwan.**
-> Automatically analyzes your watchlist daily and delivers an actionable **Decision Dashboard** to Telegram, Discord, Slack, Email, Feishu, or WeChat Work.
+> 🤖 **DAILY QUANTS** — AI-powered quantitative analysis & time-series price forecasting system for **Indian Stock Market (NSE / BSE), US, Hong Kong, China A-shares, Japan, Korea, and Taiwan.**
+> Combines **Kronos Foundation Models** with Multi-Agent qualitative intelligence to deliver actionable **Decision Dashboards** to Telegram, Discord, Slack, Email, Feishu, or WeChat Work.
 
 [**Product Preview**](#-product-preview) · [**Key Features**](#-key-features) · [**Quick Start**](#-quick-start) · [**Sample Output**](#-sample-output) · [**Documentation Index**](docs/INDEX_EN.md) · [**Full Guide**](docs/full-guide_EN.md)
 
