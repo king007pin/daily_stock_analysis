@@ -195,3 +195,21 @@ def get_market_guidelines(stock_code: Optional[str], lang: str = "zh") -> str:
     market = detect_market(stock_code)
     lang_key = "en" if lang in ("en", "ko") else "zh"
     return _MARKET_GUIDELINES.get(market, _MARKET_GUIDELINES["cn"])[lang_key]
+
+
+_MARKET_CURRENCY = {
+    "in": "₹",
+    "us": "$",
+    "hk": "HK$",
+    "cn": "¥",
+    "jp": "¥",
+    "kr": "₩",
+    "tw": "NT$",
+}
+
+
+def get_currency_symbol(stock_code: Optional[str]) -> str:
+    """Return currency symbol for a given stock code based on detected market."""
+    market = detect_market(stock_code)
+    return _MARKET_CURRENCY.get(market, "$")
+

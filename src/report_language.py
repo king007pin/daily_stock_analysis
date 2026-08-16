@@ -1336,3 +1336,48 @@ def get_sentiment_label(score: int, language: Optional[str]) -> str:
     if score >= 20:
         return "悲观"
     return "极度悲观"
+
+
+def localize_kronos_forecast(forecast: Optional[Dict[str, Any]], language: Optional[str] = "en") -> str:
+    """Format Kronos forecast result into a localized markdown section."""
+    if not forecast:
+        return ""
+
+    from src.market_context import get_currency_symbol
+
+    code = forecast.get("stock_code", "")
+    curr = get_currency_symbol(code)
+    lang = normalize_report_language(language)
+    trend = forecast.get("trend_direction", "SIDEWAYS")
+    ret = float(forecast.get("projected_return_pct", 0.0))
+    horizon = int(forecast.get("horizon_days", 5))
+    tp = float(forecast.get("target_take_profit", 0.0))
+    sl = float(forecast.get("target_stop_loss", 0.0))
+    rrr = float(forecast.get("risk_reward_ratio", 0.0))
+    conf = int(forecast.get("confidence_score", 50))
+    prec = 4 if max(tp, sl, float(forecast.get("current_price", 10.0))) < 1.0 else 2
+
+    if lang == "en":
+        trend_label = "Bullish 📈" if trend == "BULLISH" else ("Bearish 📉" if trend == "BEARISH" else "Neutral ⚖️")
+        return (
+            f"🔮 **Kronos AI Forward Price Projection ({horizon} Trading Sessions)**\n"
+            f"- **Trajectory**: {trend_label} (Expected Return: {ret:+.2f}%, Confidence: {conf}%)\n"
+            f"- **Target Take-Profit**: {curr}{tp:.{prec}f} | **Dynamic Stop-Loss**: {curr}{sl:.{prec}f} (RRR: 1:{rrr:.1f})"
+        )
+
+    if lang == "ko":
+        trend_label = "상승 📈" if trend == "BULLISH" else ("하락 📉" if trend == "BEARISH" else "중립 ⚖️")
+        return (
+            f"🔮 **Kronos AI 가격 예측 (향후 {horizon} 거래일)**\n"
+            f"- **예상 추세**: {trend_label} (예상 수익률: {ret:+.2f}%, 신뢰도: {conf}%)\n"
+            f"- **목표 익절가**: {curr}{tp:.{prec}f} | **동적 손절가**: {curr}{sl:.{prec}f} (손익비: 1:{rrr:.1f})"
+        )
+
+    trend_label = "看多 📈" if trend == "BULLISH" else ("看空 📉" if trend == "BEARISH" else "震荡 ⚖️")
+    return (
+        f"🔮 **Kronos 基础模型时间序列预测 (未来{horizon}个交易日)**\n"
+        f"- **预测走势**: {trend_label} (预期收益: {ret:+.2f}%, 置信度: {conf}%)\n"
+        f"- **目标止盈位**: {curr}{tp:.{prec}f} | **动态止损位**: {curr}{sl:.{prec}f} (盈亏比: 1:{rrr:.1f})"
+    )
+
+

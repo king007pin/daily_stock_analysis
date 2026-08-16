@@ -18,7 +18,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 from enum import Enum
 
 import pandas as pd
@@ -132,6 +132,9 @@ class TrendAnalysisResult:
     signal_score: int = 0            # 综合评分 0-100
     signal_reasons: List[str] = field(default_factory=list)
     risk_factors: List[str] = field(default_factory=list)
+
+    # Kronos 预测结果
+    kronos_forecast: Optional[Dict[str, Any]] = None
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -166,6 +169,7 @@ class TrendAnalysisResult:
             'rsi_24': self.rsi_24,
             'rsi_status': self.rsi_status.value,
             'rsi_signal': self.rsi_signal,
+            'kronos_forecast': self.kronos_forecast,
         }
 
 
@@ -259,6 +263,32 @@ class StockTrendAnalyzer:
 
         # 7. 生成买入信号
         self._generate_signal(result)
+
+        # 8. Kronos 基础模型时间序列预测（若启用）
+        try:
+            cfg = get_config()
+            if getattr(cfg, "enable_kronos_forecast", True):
+                from src.services.kronos_service import KronosForecaster
+                forecaster = KronosForecaster(
+                    model_name=getattr(cfg, "kronos_model_name", "NeoQuasar/Kronos-small"),
+                    tokenizer_name=getattr(cfg, "kronos_tokenizer_name", "NeoQuasar/Kronos-Tokenizer-base"),
+                    api_url=getattr(cfg, "kronos_api_url", None),
+                    horizon_days=getattr(cfg, "kronos_horizon_days", 5),
+                    device=getattr(cfg, "kronos_device", "auto"),
+                )
+                kronos_res = forecaster.forecast(df, code)
+                if kronos_res:
+                    result.kronos_forecast = kronos_res.to_dict()
+                    if kronos_res.trend_direction == "BULLISH" and kronos_res.confidence_score >= 65:
+                        result.signal_reasons.append(
+                            f"🔮 Kronos AI: 预测未来{kronos_res.horizon_days}日上涨({kronos_res.projected_return_pct:+.1f}%)，目标位 ₹{kronos_res.target_take_profit:.2f}"
+                        )
+                    elif kronos_res.trend_direction == "BEARISH" and kronos_res.confidence_score >= 65:
+                        result.risk_factors.append(
+                            f"⚠️ Kronos AI 预警: 预测未来{kronos_res.horizon_days}日承压({kronos_res.projected_return_pct:+.1f}%)，防守位 ₹{kronos_res.target_stop_loss:.2f}"
+                        )
+        except Exception as e:
+            logger.debug("Kronos forecast integration skipped: %s", e)
 
         return result
     

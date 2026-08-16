@@ -1220,6 +1220,14 @@ class Config:
     # 熔断器冷却时间（秒）
     circuit_breaker_cooldown: int = 300
 
+    # === Kronos 预测基础模型配置 ===
+    enable_kronos_forecast: bool = True
+    kronos_model_name: str = "NeoQuasar/Kronos-small"
+    kronos_tokenizer_name: str = "NeoQuasar/Kronos-Tokenizer-base"
+    kronos_api_url: str = ""
+    kronos_horizon_days: int = 5
+    kronos_device: str = "auto"
+
     # === 基本面聚合开关与降级保护 ===
     # 全局总开关；关闭时返回 not_supported 并保持主流程无变化
     enable_fundamental_pipeline: bool = True
@@ -2200,6 +2208,12 @@ class Config:
             realtime_source_priority=cls._resolve_realtime_source_priority(),
             realtime_cache_ttl=parse_env_int(os.getenv('REALTIME_CACHE_TTL'), 600, field_name='REALTIME_CACHE_TTL', minimum=0),
             circuit_breaker_cooldown=parse_env_int(os.getenv('CIRCUIT_BREAKER_COOLDOWN'), 300, field_name='CIRCUIT_BREAKER_COOLDOWN', minimum=0),
+            enable_kronos_forecast=os.getenv('ENABLE_KRONOS_FORECAST', 'true').lower() == 'true',
+            kronos_model_name=os.getenv('KRONOS_MODEL_NAME', 'NeoQuasar/Kronos-small'),
+            kronos_tokenizer_name=os.getenv('KRONOS_TOKENIZER_NAME', 'NeoQuasar/Kronos-Tokenizer-base'),
+            kronos_api_url=os.getenv('KRONOS_API_URL', ''),
+            kronos_horizon_days=parse_env_int(os.getenv('KRONOS_HORIZON_DAYS'), 5, field_name='KRONOS_HORIZON_DAYS', minimum=1, maximum=30),
+            kronos_device=os.getenv('KRONOS_DEVICE', 'auto'),
             enable_fundamental_pipeline=os.getenv('ENABLE_FUNDAMENTAL_PIPELINE', 'true').lower() == 'true',
             fundamental_stage_timeout_seconds=parse_env_float(
                 os.getenv('FUNDAMENTAL_STAGE_TIMEOUT_SECONDS'),

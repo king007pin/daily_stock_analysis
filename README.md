@@ -42,6 +42,7 @@
 | Capability | Coverage |
 |------------|----------|
 | **AI Decision Reports** | Core conclusion, score (0-100), trend prediction, entry/exit levels, risk alerts, catalysts, and action checklist |
+| **Kronos Time-Series AI** | Forward candlestick price projection, volatility cones, and quant momentum setups powered by Kronos (AAAI 2026 foundation model) with zero-crash statistical fallback |
 | **Multi-Market Data** | Full coverage for **Indian Market (NSE `.NS` / BSE `.BO`)**, US, Hong Kong, China A-shares, Japan (`.T`), Korea (`.KS`/`.KQ`), Taiwan (`.TW`/`.TWO`), and ETFs. Includes quotes, K-lines, technical indicators, news, announcements, fundamentals, and report context. See [Market Support Boundaries](docs/market-support.md) |
 | **Web & Desktop Workspace** | Manual analysis, task progress, history, full Markdown reports, backtest, portfolio, settings, and light/dark themes |
 | **Agent Strategy Chat** | Multi-turn Q&A with 15 built-in strategies across Web/Bot/API |
@@ -54,7 +55,7 @@
 
 | Type | Supported Providers |
 |------|---------------------|
-| **AI Models** | [Anspire](https://open.anspire.cn/?share_code=QFBC0FYC), [AIHubMix](https://inferera.com/?aff=CfMq), Google Gemini, OpenAI-compatible providers, DeepSeek, Qwen, Claude, Ollama (Local) |
+| **AI & Time-Series Models** | [Anspire](https://open.anspire.cn/?share_code=QFBC0FYC), [AIHubMix](https://inferera.com/?aff=CfMq), Google Gemini, OpenAI-compatible providers, DeepSeek, Qwen, Claude, Ollama (Local), [Kronos](https://github.com/NeoQuasar/Kronos) (Time-Series) |
 | **Market Data** | [TickFlow](https://tickflow.org/auth/register?ref=WDSGSPS5XC), Yahoo Finance (India NSE/BSE, US, HK, JP, KR, TW), AkShare, Tushare, Pytdx, Baostock, Longbridge |
 | **News Search** | [Anspire](https://open.anspire.cn/?share_code=QFBC0FYC), [SerpAPI](https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis), [Tavily](https://tavily.com/), [Bocha](https://open.bocha.cn/), [Brave](https://brave.com/search/api/), [MiniMax](https://platform.minimaxi.com/), SearXNG |
 | **Social Sentiment** | [Stock Sentiment API](https://api.adanos.org/docs) (Reddit / X / Polymarket, US stocks only) |

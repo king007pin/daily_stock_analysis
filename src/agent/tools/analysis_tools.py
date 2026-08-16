@@ -84,6 +84,7 @@ def _handle_analyze_trend(stock_code: str) -> dict:
         "signal_score": result.signal_score,
         "signal_reasons": result.signal_reasons,
         "risk_factors": result.risk_factors,
+        "kronos_forecast": result.kronos_forecast,
     }
 
 
@@ -523,9 +524,61 @@ analyze_pattern_tool = ToolDefinition(
 )
 
 
+def _handle_forecast_kronos(stock_code: str, horizon_days: int = 5) -> dict:
+    """Run Kronos time-series candlestick forward price & volatility projection."""
+    from src.services.kronos_service import KronosForecaster
+
+    if not (stock_code and str(stock_code).strip()):
+        return {"error": "stock_code is required"}
+
+    try:
+        horizon_days = max(1, min(30, int(horizon_days)))
+    except (ValueError, TypeError):
+        horizon_days = 5
+
+    df = _fetch_trend_data(stock_code)
+    if df is None or df.empty:
+        return {"error": f"No historical data available for Kronos forecast on {stock_code}"}
+
+    forecaster = KronosForecaster(horizon_days=horizon_days)
+    try:
+        result = forecaster.forecast(df, stock_code, horizon_days=horizon_days)
+        return result.to_dict()
+    except Exception:
+        logger.warning("forecast_kronos(%s): Kronos forecast failed", stock_code, exc_info=True)
+        return {"error": f"Kronos forecasting failed for {stock_code}"}
+
+
+forecast_kronos_tool = ToolDefinition(
+    name="forecast_kronos",
+    description="Run Kronos (financial candlestick foundation model) forward price & volatility prediction. "
+                "Forecasts next N trading sessions' prices, upper/lower volatility boundaries, expected return %, "
+                "trend direction, dynamic stop-loss, and take-profit targets.",
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="Stock code (e.g. 'RELIANCE.NS', 'BCG.NS', 'AAPL', '600519')",
+        ),
+        ToolParameter(
+            name="horizon_days",
+            type="integer",
+            description="Number of forward trading sessions to forecast (default: 5, max: 30)",
+            required=False,
+            default=5,
+        ),
+    ],
+    handler=_handle_forecast_kronos,
+    category="analysis",
+    policy=_ANALYSIS_READ_POLICY,
+)
+
+
 ALL_ANALYSIS_TOOLS = [
     analyze_trend_tool,
     calculate_ma_tool,
     get_volume_analysis_tool,
     analyze_pattern_tool,
+    forecast_kronos_tool,
 ]
+
