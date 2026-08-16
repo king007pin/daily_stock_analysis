@@ -60,7 +60,7 @@ _SUFFIX_DIGIT_LENS: dict = {
     ".TW": (4, 5, 6),
 }
 
-_PRESERVE_SUFFIXES = {".T", ".KS", ".KQ", ".TW", ".TWO"}
+_PRESERVE_SUFFIXES = {".T", ".KS", ".KQ", ".TW", ".TWO", ".NS", ".BO"}
 _US_INDEX_CODES = {
     "SPX",
     "^GSPC",
@@ -195,11 +195,13 @@ def _normalize_explicit_exchange_parts(
 
 
 def is_code_like(value: str) -> bool:
-    """Check if string looks like a stock code (5-6 digits, 1-5 letters, or prefixed code)."""
+    """Check if string looks like a stock code (5-6 digits, 1-5 letters, or prefixed/suffixed code)."""
     text = value.strip().upper()
     if not text:
         return False
     if text.isdigit() and len(text) in (5, 6):
+        return True
+    if normalize_suffix_market_symbol(text) is not None:
         return True
     explicit_parts = _split_explicit_exchange(text)
     if explicit_parts is not None:
@@ -236,6 +238,8 @@ def _normalize_code_and_exchange(raw: str) -> tuple[Optional[str], str]:
         return None, explicit_exchange
     suffix_symbol = normalize_suffix_market_symbol(text)
     if suffix_symbol is not None:
+        if not explicit_exchange and "." in suffix_symbol:
+            explicit_exchange = suffix_symbol.rsplit(".", 1)[-1]
         return suffix_symbol, explicit_exchange
     if any(text.endswith(suffix) for suffix in _PRESERVE_SUFFIXES):
         return None, explicit_exchange

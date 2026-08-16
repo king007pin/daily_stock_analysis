@@ -78,6 +78,10 @@ _MARKET_ROLES = {
         "zh": "台股",
         "en": "Taiwan stock",
     },
+    "in": {
+        "zh": "印度股票",
+        "en": "Indian stock",
+    },
 }
 
 _MARKET_GUIDELINES = {
@@ -144,6 +148,20 @@ _MARKET_GUIDELINES = {
             "electronics-foundry supply chain, the three institutional investor groups (foreign / "
             "investment-trust / dealer), margin trading and day trading, and the TWSE/TPEx ±10% daily "
             "price limit; do not apply China A-share-specific concepts such as Northbound flows or Dragon Tiger lists."
+        ),
+    },
+    "in": {
+        "zh": (
+            "- 本次分析对象为 **印度股票**（NSE 印度国家证券交易所 `.NS`，或 BSE 孟买证券交易所 `.BO`）。\n"
+            "- 请按印度市场语境分析：关注印度卢比（INR）汇率、印度储备银行（RBI）货币政策、外资机构（FII）与本土机构（DII）资金动向、"
+            "SEBI 监管法规以及个股熔断机制/电路断路器（5%/10%/20%）和 T+1 结算制度；"
+            "不要套用 A 股专属的北向资金、龙虎榜、涨跌停板打板等概念。"
+        ),
+        "en": (
+            "- This analysis covers an **Indian stock** (listed on NSE with `.NS` or BSE with `.BO`).\n"
+            "- Use Indian market context: INR FX, Reserve Bank of India (RBI) interest rate policy, Foreign Institutional Investors (FII) & "
+            "Domestic Institutional Investors (DII) flows, SEBI regulations, stock circuit filters (5%/10%/20%), and T+1 rolling settlement; "
+            "do not apply China A-share-specific concepts like Northbound flows, Dragon Tiger lists, or A-share board-limit speculation."
         ),
     },
 }

@@ -43,6 +43,7 @@ from src.data.stock_mapping import (
     canonicalize_foreign_stock_code,
     foreign_stock_english_aliases,
 )
+from src.services.market_symbol_utils import is_suffix_market_symbol
 from src.services.run_diagnostics import record_provider_run, record_provider_run_started
 
 logger = logging.getLogger(__name__)
@@ -2520,6 +2521,9 @@ class SearchService:
         # 与 00700.HK 后缀全部归一为 00700 形式，原 lower.startswith('hk')
         # 分支在 canonical 之后为不可达死代码，已删除。
         if code.isdigit() and len(code) == 5:
+            return True
+        # 离岸与海外后缀市场股票（日韩台印等，如 .T, .KS, .TW, .NS, .BO）使用英文搜索
+        if is_suffix_market_symbol(code) or is_suffix_market_symbol(stock_code):
             return True
         return False
 
