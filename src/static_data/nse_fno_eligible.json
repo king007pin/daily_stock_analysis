@@ -1,0 +1,16 @@
+{
+  "_meta": {
+    "description": "Partial seed list of NSE F&O-eligible symbols, used by IntradaySignalEngine's leverage sizer (is_fno_eligible: 5x MIS vs 2x cash).",
+    "completeness": "PARTIAL - approximately 25 of ~208 NSE F&O-eligible symbols as of source date. NOT exhaustive.",
+    "default_for_unlisted_symbols": "False (cash, 2x leverage) - the safe direction to be wrong in.",
+    "source": "https://dhan.co/futures-stocks-list/ (top-liquidity page, live-fetched)",
+    "source_fetched": "2026-08-18",
+    "refresh_needed": "NSE's own CSV endpoint (archives.nseindia.com) is bot-blocked without a browser session. Full-list refresh needs the same Scrapling stealth path already used by src/services/live_scraper_service.py, or a manual quarterly paste matching NSE's F&O review cycle. Not built - tracked as a follow-up, not silently assumed complete."
+  },
+  "symbols": [
+    "RELIANCE", "BHARTIARTL", "HDFCBANK", "ICICIBANK", "SBIN", "TCS",
+    "BAJFINANCE", "LT", "LICI", "HINDUNILVR", "INFY", "SUNPHARMA",
+    "TITAN", "MARUTI", "M&M", "ADANIPOWER", "ADANIENT", "ADANIPORTS",
+    "KOTAKBANK", "AXISBANK", "HCLTECH", "HAL", "ULTRACEMCO", "ITC", "NTPC"
+  ]
+}
