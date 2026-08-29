@@ -79,6 +79,30 @@ WEB_SETTINGS_HIDDEN_FROM_UI = {
     "USE_PROXY",
     "PROXY_HOST",
     "PROXY_PORT",
+    # Advanced quant settings, edited in .env rather than the Web UI.
+    # Transaction-cost rates and risk limits carry sourcing obligations and
+    # unit conventions (fractions vs percentages) that a bare number input
+    # cannot convey safely; a mistyped tax rate silently corrupts every net
+    # return figure. Kept out of the UI deliberately, not by oversight.
+    "DECISION_OUTCOME_DAILY_REFILL_ENABLED",
+    "TXN_COST_BROKERAGE_RATE",
+    "TXN_COST_BROKERAGE_CAP_INR",
+    "TXN_COST_STT_MIS_BUY_RATE",
+    "TXN_COST_STT_MIS_SELL_RATE",
+    "TXN_COST_STT_CNC_BUY_RATE",
+    "TXN_COST_STT_CNC_SELL_RATE",
+    "TXN_COST_EXCHANGE_TXN_RATE",
+    "TXN_COST_SEBI_TURNOVER_RATE",
+    "TXN_COST_STAMP_DUTY_BUY_RATE",
+    "TXN_COST_GST_RATE",
+    "RISK_LIMIT_MAX_DRAWDOWN_PCT",
+    "RISK_LIMIT_MAX_RISK_PER_TRADE_PCT",
+    "RISK_LIMIT_MAX_DAILY_LOSS_PCT",
+    "RISK_LIMIT_MAX_GROSS_EXPOSURE_PCT",
+    "RISK_LIMIT_MAX_POSITIONS",
+    "RISK_LIMIT_MAX_POSITIONS_PER_SECTOR",
+    "RISK_LIMIT_MAX_CORRELATED_POSITIONS",
+    "RISK_LIMIT_CORRELATION_THRESHOLD",
 }
 
 _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
@@ -3725,6 +3749,67 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "examples": [
             "BACKTEST_NEUTRAL_BAND_PCT=2.0",
             "BACKTEST_EVAL_WINDOW_DAYS=10",
+        ],
+        "docs": [
+            {
+                "label": "完整指南：回测配置",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#回测功能",
+            },
+        ],
+        "warning_codes": [],
+    },
+    "BACKTEST_NEUTRAL_BAND_PCT_BY_HORIZON": {
+        "title": "Backtest Neutral Band Pct By Horizon",
+        "description": (
+            "Per-horizon override for the neutral band, as comma-separated "
+            "'horizon:percent' pairs. Leave empty to use the flat "
+            "BACKTEST_NEUTRAL_BAND_PCT for every horizon."
+        ),
+        "category": "backtest",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "",
+        "options": [],
+        "validation": {},
+        "display_order": 51,
+        "help_key": "settings.backtest.eval_params",
+        "examples": [
+            "BACKTEST_NEUTRAL_BAND_PCT_BY_HORIZON=intraday:0.6,1d:1.0,3d:2.0,5d:2.5,10d:3.0",
+            "BACKTEST_NEUTRAL_BAND_PCT=2.0",
+        ],
+        "docs": [
+            {
+                "label": "完整指南：回测配置",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#回测功能",
+            },
+        ],
+        "warning_codes": [],
+    },
+    "BACKTEST_BAR_ADAPTIVE_HIGH_LOW_ORDERING": {
+        "title": "Backtest Bar Adaptive High Low Ordering",
+        "description": (
+            "When stop-loss and take-profit are both touched inside one daily "
+            "bar, assume the bar reached the extreme nearest its open first. "
+            "Off keeps the conservative stop-loss-first assumption. Changing "
+            "this changes stored outcomes."
+        ),
+        "category": "backtest",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "false",
+        "options": [],
+        "validation": {},
+        "display_order": 52,
+        "help_key": "settings.backtest.eval_params",
+        "examples": [
+            "BACKTEST_BAR_ADAPTIVE_HIGH_LOW_ORDERING=false",
+            "BACKTEST_ENGINE_VERSION=v1",
         ],
         "docs": [
             {

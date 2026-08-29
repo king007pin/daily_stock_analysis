@@ -103,6 +103,7 @@ class RealtimeSource(Enum):
     SINA = "sina"                   # 新浪直连
     STOOQ = "stooq"                 # Stooq 美股兜底
     LONGBRIDGE = "longbridge"       # 长桥（美股/港股兜底）
+    JUGAAD_NSE = "jugaad_nse"       # NSE 直连（jugaad-data NSELive）
     FALLBACK = "fallback"           # 降级兜底
 
 
@@ -159,7 +160,13 @@ class UnifiedRealtimeQuote:
     change_60d: Optional[float] = None      # 60日涨跌幅(%)
     high_52w: Optional[float] = None        # 52周最高
     low_52w: Optional[float] = None         # 52周最低
-    
+
+    # === 盘口深度（仅交易所直连源，如印度 NSE 提供）===
+    bid_price: Optional[float] = None       # 买一价
+    bid_qty: Optional[int] = None           # 买一量
+    ask_price: Optional[float] = None       # 卖一价
+    ask_qty: Optional[int] = None           # 卖一量
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典（过滤 None 值）"""
         result = {
@@ -175,7 +182,8 @@ class UnifiedRealtimeQuote:
             'volume_ratio', 'turnover_rate', 'amplitude',
             'open_price', 'high', 'low', 'pre_close',
             'pe_ratio', 'pb_ratio', 'total_mv', 'circ_mv',
-            'change_60d', 'high_52w', 'low_52w'
+            'change_60d', 'high_52w', 'low_52w',
+            'bid_price', 'bid_qty', 'ask_price', 'ask_qty',
         ]
         for f in optional_fields:
             val = getattr(self, f, None)

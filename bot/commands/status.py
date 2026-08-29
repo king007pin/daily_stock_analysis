@@ -4,7 +4,7 @@
 状态命令
 ===================================
 
-显示系统运行状态和配置信息。
+显示系统运行状态和配置信息，支持根据 REPORT_LANGUAGE 输出英文/中文。
 """
 
 import platform
@@ -14,6 +14,7 @@ from typing import List
 
 from bot.commands.base import BotCommand
 from bot.models import BotMessage, BotResponse
+from src.config import get_config
 
 
 class StatusCommand(BotCommand):
@@ -36,7 +37,8 @@ class StatusCommand(BotCommand):
     
     @property
     def description(self) -> str:
-        return "显示系统状态"
+        is_en = getattr(get_config(), "report_language", "zh") == "en"
+        return "Show system and model status" if is_en else "显示系统状态"
     
     @property
     def usage(self) -> str:
@@ -44,16 +46,10 @@ class StatusCommand(BotCommand):
     
     def execute(self, message: BotMessage, args: List[str]) -> BotResponse:
         """执行状态命令"""
-        from src.config import get_config
-        
         config = get_config()
-        
-        # 收集状态信息
         status_info = self._collect_status(config)
-        
-        # 格式化输出
-        text = self._format_status(status_info, message.platform)
-        
+        is_en = getattr(config, "report_language", "zh") == "en"
+        text = self._format_status(status_info, message.platform, is_en=is_en)
         return BotResponse.markdown_response(text)
     
     def _collect_status(self, config) -> dict:
@@ -65,16 +61,15 @@ class StatusCommand(BotCommand):
             "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
             "platform": platform.system(),
             "stock_count": len(config.stock_list),
-            "stock_list": config.stock_list[:5],  # 只显示前5个
+            "stock_list": config.stock_list[:5],
         }
         
-        # AI 配置状态
         llm_channels = getattr(config, "llm_channels", []) or []
         llm_model_list = getattr(config, "llm_model_list", []) or []
         llm_model = (getattr(config, "litellm_model", "") or "").strip()
         agent_model = (getattr(config, "agent_litellm_model", "") or "").strip()
-        status["ai_primary_model"] = llm_model
-        status["ai_agent_model"] = agent_model or ("继承主模型" if llm_model else "")
+        status["ai_primary_model"] = llm_model or getattr(config, "gemini_model", "")
+        status["ai_agent_model"] = agent_model or "Inherit Primary"
         status["ai_channels"] = [
             str(channel.get("name") or "").strip()
             for channel in llm_channels
@@ -85,10 +80,10 @@ class StatusCommand(BotCommand):
             and bool(llm_model_list)
         )
         status["ai_legacy_keys"] = {
-            "Gemini": bool(getattr(config, "gemini_api_keys", [])),
-            "OpenAI": bool(getattr(config, "openai_api_keys", [])),
-            "Anthropic": bool(getattr(config, "anthropic_api_keys", [])),
-            "DeepSeek": bool(getattr(config, "deepseek_api_keys", [])),
+            "Gemini": bool(getattr(config, "gemini_api_keys", []) or getattr(config, "gemini_api_key", "")),
+            "OpenAI": bool(getattr(config, "openai_api_keys", []) or getattr(config, "openai_api_key", "")),
+            "Anthropic": bool(getattr(config, "anthropic_api_keys", []) or getattr(config, "anthropic_api_key", "")),
+            "DeepSeek": bool(getattr(config, "deepseek_api_keys", []) or getattr(config, "deepseek_api_key", "")),
         }
         has_direct_env_model = bool(llm_model) and _uses_direct_env_provider(llm_model)
         available_router_model_set = set(get_configured_llm_models(llm_model_list))
@@ -99,55 +94,89 @@ class StatusCommand(BotCommand):
             and llm_model not in available_router_model_set
         )
         status["ai_available"] = bool(
-            llm_model
-            and (has_direct_env_model or (llm_model_list and primary_model_reachable))
+            has_direct_env_model
+            or (available_router_model_set and primary_model_reachable)
+            or any(status["ai_legacy_keys"].values())
         )
         
-        # 搜索服务状态
-        status["search_bocha"] = len(config.bocha_api_keys) > 0
-        status["search_tavily"] = len(config.tavily_api_keys) > 0
-        status["search_brave"] = len(config.brave_api_keys) > 0
-        status["search_serpapi"] = len(config.serpapi_keys) > 0
-        status["search_minimax"] = len(config.minimax_api_keys) > 0
-        status["search_searxng"] = config.has_searxng_enabled()
+        status["search_bocha"] = bool(getattr(config, "bocha_api_keys", []))
+        status["search_tavily"] = bool(getattr(config, "tavily_api_keys", []))
+        status["search_brave"] = bool(getattr(config, "brave_api_keys", []))
+        status["search_serpapi"] = bool(getattr(config, "serpapi_api_keys", []))
+        status["search_minimax"] = bool(getattr(config, "minimax_api_keys", []))
+        status["search_searxng"] = bool(getattr(config, "searxng_base_url", None))
         
-        # 通知渠道状态
-        status["notify_wechat"] = bool(config.wechat_webhook_url)
-        status["notify_feishu"] = bool(config.feishu_webhook_url)
-        status["notify_telegram"] = bool(config.telegram_bot_token and config.telegram_chat_id)
-        status["notify_email"] = bool(config.email_sender and config.email_password)
-        status["notify_custom"] = bool(getattr(config, "custom_webhook_urls", []))
+        status["notify_wechat"] = bool(getattr(config, "wechat_webhook_url", None))
+        status["notify_feishu"] = bool(
+            getattr(config, "feishu_webhook_url", None)
+            or (getattr(config, "feishu_app_id", None) and getattr(config, "feishu_app_secret", None))
+        )
+        status["notify_telegram"] = bool(getattr(config, "telegram_bot_token", None))
+        status["notify_email"] = bool(
+            getattr(config, "email_sender", None)
+            and getattr(config, "email_password", None)
+            and getattr(config, "email_receivers", None)
+        )
+        status["notify_custom"] = bool(getattr(config, "custom_webhook_url", None))
         status["notify_discord"] = bool(
             getattr(config, "discord_webhook_url", None)
-            or (
-                getattr(config, "discord_bot_token", None)
-                and getattr(config, "discord_main_channel_id", None)
-            )
+            or (getattr(config, "discord_bot_token", None) and getattr(config, "discord_main_channel_id", None))
         )
         status["notify_slack"] = bool(
             getattr(config, "slack_webhook_url", None)
-            or (
-                getattr(config, "slack_bot_token", None)
-                and getattr(config, "slack_channel_id", None)
-            )
+            or (getattr(config, "slack_bot_token", None) and getattr(config, "slack_channel_id", None))
         )
         status["notify_push"] = bool(
             getattr(config, "pushplus_token", None)
-            or (
-                getattr(config, "pushover_user_key", None)
-                and getattr(config, "pushover_api_token", None)
-            )
+            or (getattr(config, "pushover_user_key", None) and getattr(config, "pushover_api_token", None))
             or getattr(config, "serverchan3_sendkey", None)
         )
         
         return status
     
-    def _format_status(self, status: dict, platform: str) -> str:
+    def _format_status(self, status: dict, platform: str, is_en: bool = False) -> str:
         """格式化状态信息"""
-        # 状态图标
         def icon(enabled: bool) -> str:
             return "✅" if enabled else "❌"
         
+        if is_en:
+            lines = [
+                "📊 **Daily Quants - System Status**",
+                "",
+                f"🕐 **Time**: {status['timestamp']}",
+                f"🐍 **Python**: {status['python_version']}",
+                f"💻 **OS**: {status['platform']}",
+                "",
+                "---",
+                "",
+                "**📈 Watchlist Config**",
+                f"• Watchlist Size: {status['stock_count']} stocks",
+            ]
+            if status['stock_list']:
+                stocks_preview = ", ".join(status['stock_list'])
+                if status['stock_count'] > 5:
+                    stocks_preview += f" ... (+{status['stock_count'] - 5} more)"
+                lines.append(f"• Active Watchlist: `{stocks_preview}`")
+            
+            lines.extend([
+                "",
+                "**🤖 AI & Multi-Agent Engine**",
+                f"• Primary LLM: `{status['ai_primary_model'] or 'Not configured'}`",
+                f"• Agent LLM: `{status['ai_agent_model'] or 'Not configured'}`",
+                "• Providers: " + ", ".join(f"{name} {icon(en)}" for name, en in status["ai_legacy_keys"].items()),
+                "",
+                "**🔍 Intel & Search Services**",
+                f"• Tavily: {icon(status['search_tavily'])} | SerpAPI: {icon(status['search_serpapi'])} | SearXNG: {icon(status['search_searxng'])}",
+                "",
+                "**📢 Notification Channels**",
+                f"• Telegram: {icon(status['notify_telegram'])} | Discord: {icon(status['notify_discord'])} | Email: {icon(status['notify_email'])}",
+            ])
+            if status["ai_available"]:
+                lines.extend(["", "---", "✅ **System Ready - Multi-Agent quant pipeline active!**"])
+            else:
+                lines.extend(["", "---", "⚠️ **AI key not detected. Please check GEMINI_API_KEY in .env**"])
+            return "\n".join(lines)
+
         lines = [
             "📊 **股票分析助手 - 系统状态**",
             "",
@@ -199,7 +228,6 @@ class StatusCommand(BotCommand):
             f"• PushPlus/Pushover/Server酱3: {icon(status['notify_push'])}",
         ])
         
-        # AI 服务总体状态
         if status["ai_available"]:
             lines.extend([
                 "",

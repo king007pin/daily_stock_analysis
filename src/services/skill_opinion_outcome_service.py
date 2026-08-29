@@ -182,12 +182,23 @@ class SkillOpinionOutcomeService:
             ),
         )
 
+        if candidate.horizon == "intraday":
+            # resolve_stock_daily_window() sources forward_bars via
+            # get_forward_bars(), which excludes the anchor day by design
+            # (built for swing/EOD semantics). A same-day signal must be
+            # evaluated against its OWN day's bar (forced square-off proxy),
+            # not the day after — see SkillOpinionOutcomeEvaluator.evaluate's
+            # open-vs-close branch, which this pairs with.
+            forward_bars = (window.start_bar,) if window is not None and window.start_bar is not None else ()
+        else:
+            forward_bars = window.forward_bars if window is not None else ()
+
         return SkillOpinionOutcomeEvaluator.evaluate(
             signal=candidate.sample.signal,
             horizon=candidate.horizon,
             analysis_date=analysis_date,
             start_bar=window.start_bar if window is not None else None,
-            forward_bars=window.forward_bars if window is not None else (),
+            forward_bars=forward_bars,
         )
 
     @staticmethod

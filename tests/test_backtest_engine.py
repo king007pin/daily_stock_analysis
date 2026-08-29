@@ -167,7 +167,17 @@ class BacktestEngineTestCase(unittest.TestCase):
             forward_bars=self._bars(date(2024, 1, 1), [99.5, 99, 99]),
             config=cfg,
         )
+        # not_up is the mirror of not_down: hit at or below zero, miss beyond
+        # +band, neutral in between. A +1.5% drift inside a 2% band is NOT a
+        # correct defensive call — it is neutral.
         not_up = BacktestEngine.evaluate_decision_signal(
+            direction_expected="not_up",
+            anchor_date=date(2024, 1, 1),
+            start_price=100,
+            forward_bars=self._bars(date(2024, 1, 1), [99.5, 99, 98.5]),
+            config=cfg,
+        )
+        not_up_neutral = BacktestEngine.evaluate_decision_signal(
             direction_expected="not_up",
             anchor_date=date(2024, 1, 1),
             start_price=100,
@@ -185,6 +195,7 @@ class BacktestEngineTestCase(unittest.TestCase):
         self.assertEqual(up["outcome"], "hit")
         self.assertEqual(not_down["outcome"], "neutral")
         self.assertEqual(not_up["outcome"], "hit")
+        self.assertEqual(not_up_neutral["outcome"], "neutral")
         self.assertEqual(not_up_miss["outcome"], "miss")
 
     def test_decision_signal_helper_rejects_non_finite_prices(self):

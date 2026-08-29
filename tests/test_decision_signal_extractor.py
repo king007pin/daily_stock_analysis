@@ -113,6 +113,33 @@ def test_build_payload_includes_tw_market() -> None:
     assert payload["action"] == "buy"
 
 
+def test_build_payload_includes_in_market() -> None:
+    """An India NSE (`in`) stock is now first-class on the DecisionSignal write path
+    (service VALID_MARKETS accepts in, matching jp/kr/tw).
+
+    Regression guard: before this fix, every NSE/BSE analysis was silently
+    dropped by _normalize_market (market detection already worked via
+    get_market_for_stock; only the VALID_MARKETS allow-list lagged behind),
+    so decision_signal_outcome_service had zero data to ever score for India.
+    """
+    result = _result(code="IDEA.NS", name="Vodafone Idea")
+
+    payload = build_decision_signal_payload_from_report(
+        result,
+        context_snapshot=None,
+        portfolio_context=None,
+        source_report_id=None,
+        trace_id="trace-in",
+        query_source="api",
+        report_type="full",
+        profile_source=BUILD_PROFILE_SOURCE,
+    )
+
+    assert payload is not None
+    assert payload["market"] == "in"
+    assert payload["action"] == "buy"
+
+
 def test_build_payload_maps_report_context_and_price_plan() -> None:
     result = _result()
     result.market_phase_summary = {"phase": "postmarket"}

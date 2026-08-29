@@ -7,16 +7,26 @@
 包含各平台的 Webhook 处理和消息解析逻辑。
 
 支持两种接入模式：
-1. Webhook 模式：需要公网 IP，配置回调 URL
-2. Stream 模式：无需公网 IP，通过 WebSocket 长连接（钉钉、飞书支持）
+1. Webhook 模式：需要公网 IP / 域名，配置回调 URL (Telegram, DingTalk, Discord, Feishu)
+2. Stream / Polling 模式：无需公网 IP，通过 WebSocket 长连接或长轮询（Telegram, 钉钉, 飞书支持）
 """
 
 from bot.platforms.base import BotPlatform
 from bot.platforms.dingtalk import DingtalkPlatform
+from bot.platforms.discord import DiscordPlatform
+from bot.platforms.telegram import TelegramPlatform
+from bot.platforms.telegram_polling import (
+    TelegramPollingClient,
+    start_telegram_polling_background,
+    stop_telegram_polling,
+    is_telegram_polling_running,
+)
 
 # 所有可用平台（Webhook 模式）
 ALL_PLATFORMS = {
     'dingtalk': DingtalkPlatform,
+    'discord': DiscordPlatform,
+    'telegram': TelegramPlatform,
 }
 
 # 钉钉 Stream 模式（可选）
@@ -56,6 +66,12 @@ except ImportError:
 __all__ = [
     'BotPlatform',
     'DingtalkPlatform',
+    'DiscordPlatform',
+    'TelegramPlatform',
+    'TelegramPollingClient',
+    'start_telegram_polling_background',
+    'stop_telegram_polling',
+    'is_telegram_polling_running',
     'ALL_PLATFORMS',
     # 钉钉 Stream 模式
     'DingtalkStreamClient',

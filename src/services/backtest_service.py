@@ -79,6 +79,9 @@ class BacktestService:
             eval_window_days=int(eval_window_days),
             neutral_band_pct=neutral_band_pct,
             engine_version=str(engine_version),
+            bar_adaptive_high_low_ordering=bool(
+                getattr(config, "backtest_bar_adaptive_high_low_ordering", False)
+            ),
         )
 
         limit_int = int(limit)

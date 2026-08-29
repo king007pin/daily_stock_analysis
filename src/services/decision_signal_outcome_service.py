@@ -37,8 +37,17 @@ from src.utils.sanitize import sanitize_decision_signal_text
 
 logger = logging.getLogger(__name__)
 
-DECISION_SIGNAL_OUTCOME_ENGINE_VERSION = "decision-signal-v1"
+# v2 (2026-08-24): scoring semantics changed, so previously stored outcomes are
+# not comparable and must be recomputed rather than mixed into the same stats.
+#   - "not_up" gained a neutral band (was: any move under +band scored a hit,
+#     which made every defensive call ~89% correct against real bars).
+#   - The neutral band is now read from config per horizon instead of being
+#     hardcoded to 2.0.
+# Rows written by v1 are ignored by the candidate scan, so they are re-evaluated
+# automatically on the next run.
+DECISION_SIGNAL_OUTCOME_ENGINE_VERSION = "decision-signal-v2"
 SUPPORTED_OUTCOME_HORIZONS = {
+    "intraday": 1,
     "1d": 1,
     "3d": 3,
     "5d": 5,
@@ -50,6 +59,41 @@ EVAL_STATUSES = frozenset({"completed", "unable"})
 FEEDBACK_VALUES = frozenset({"useful", "not_useful"})
 FEEDBACK_SOURCES = frozenset({"web", "api"})
 HOLDING_STATES = frozenset({"holding", "empty", "unknown"})
+# Direction each canonical action asserts about future price.
+DIRECTION_BY_ACTION = {
+    "buy": "up",
+    "add": "up",
+    "hold": "not_down",
+    "reduce": "not_up",
+    "sell": "not_up",
+    "avoid": "not_up",
+}
+
+# Actions that assert no direction at all, and so cannot be scored.
+#
+# This is deliberate, not an omission. "watch" was measured against 1,476 real
+# daily bars: scoring it as "not_down" (which hits on any return >= 0) yields a
+# ~78% win rate, and "alert" as "not_up" yields ~89%, purely from market drift.
+# A genuine directional call on the same bars scores 41-46%. Treating either as
+# directional would manufacture a track record rather than measure one.
+#
+# The correct handling of a high non-directional rate is to report it as a
+# coverage problem in signal generation, not to score around it.
+NON_DIRECTIONAL_ACTIONS = frozenset({"watch", "alert"})
+
+# Which side of the bar counts as "adverse" when describing max excursion.
+#
+# Deliberately broader than DIRECTION_BY_ACTION, and that difference is the
+# point rather than an inconsistency: max adverse excursion is a *descriptive*
+# statistic about what the price did afterwards, not a scored outcome. A
+# "watch" on a name being considered for a long entry has a meaningful downside
+# excursion even though the signal itself asserts no direction and is never
+# scored. These two mappings must stay separately named so the distinction
+# survives; before this they were duplicate literal sets that silently
+# disagreed.
+LONG_SIDE_EXCURSION_ACTIONS = frozenset({"buy", "add", "hold", "watch", "alert"})
+SHORT_SIDE_EXCURSION_ACTIONS = frozenset({"sell", "reduce", "avoid"})
+
 RETRYABLE_UNABLE_REASONS = frozenset({
     "missing_anchor_price",
     "invalid_anchor_price",
@@ -88,10 +132,29 @@ class DecisionSignalOutcomeService:
         signal_repo: Optional[DecisionSignalRepository] = None,
         stock_repo: Optional[StockRepository] = None,
         db_manager: Optional[DatabaseManager] = None,
+        refill_enabled: Optional[bool] = None,
     ):
         self.repo = repo or DecisionSignalOutcomeRepository(db_manager)
         self.signal_repo = signal_repo or DecisionSignalRepository(db_manager)
         self.stock_repo = stock_repo or StockRepository(db_manager)
+        # Refilling missing daily bars means a network fetch, so it is opt-in:
+        # unset behaves exactly as before, which also keeps the offline test
+        # suite offline. Enable it in the scheduled environment, where a stale
+        # stock_daily is precisely what stops recorded signals from maturing.
+        self._refill_enabled = (
+            bool(refill_enabled)
+            if refill_enabled is not None
+            else self._refill_enabled_from_config()
+        )
+
+    @staticmethod
+    def _refill_enabled_from_config() -> bool:
+        try:
+            from src.config import get_config
+
+            return bool(getattr(get_config(), "decision_outcome_daily_refill_enabled", False))
+        except Exception:  # noqa: BLE001 - config must never break evaluation
+            return False
 
     def run_outcomes(
         self,
@@ -397,6 +460,78 @@ class DecisionSignalOutcomeService:
         row = self.repo.upsert_feedback(fields)
         return self._serialize_feedback(row)
 
+    def _bars_are_inadequate(
+        self,
+        stock_code: str,
+        anchor_date: date,
+        horizon: str,
+        eval_days: int,
+        start_bar: Any,
+    ) -> bool:
+        """True when stock_daily lacks the bars this evaluation needs.
+
+        Kept deliberately cheap: it answers "is a refill worth attempting",
+        not "will evaluation succeed". A false positive costs one fetch.
+        """
+        if start_bar is None:
+            return True
+        if horizon == "intraday":
+            # The anchor day's own bar is the whole window.
+            return False
+        try:
+            forward = self.stock_repo.get_forward_bars(
+                code=stock_code,
+                analysis_date=anchor_date,
+                eval_window_days=eval_days,
+            )
+        except Exception:  # noqa: BLE001 - a probe must never break evaluation
+            return False
+        return len(forward or []) < int(eval_days)
+
+    def _try_fill_daily_data(
+        self,
+        *,
+        code: str,
+        anchor_date: date,
+        eval_window_days: int,
+    ) -> None:
+        """Fetch and persist daily bars covering the evaluation window.
+
+        Mirrors ``BacktestService._try_fill_daily_data`` deliberately — same
+        fetcher chain, same persistence call — rather than introducing a second
+        way of doing this. Fail-soft: a data-source outage must degrade the
+        outcome to "unable" as before, never raise into the evaluation loop.
+        """
+        refill_code = str(code or "").strip()
+        if not refill_code:
+            return
+
+        try:
+            from datetime import timedelta
+
+            from data_provider.base import DataFetcherManager
+
+            end_date = anchor_date + timedelta(days=max(int(eval_window_days) * 2, 30))
+            manager = DataFetcherManager()
+            df, source = manager.get_daily_data(
+                stock_code=refill_code,
+                start_date=anchor_date.strftime("%Y-%m-%d"),
+                end_date=end_date.strftime("%Y-%m-%d"),
+                days=int(eval_window_days) * 2,
+            )
+            if df is None or getattr(df, "empty", True):
+                return
+            saved = self.stock_repo.save_dataframe(df, refill_code, source)
+            logger.info(
+                "[DecisionSignalOutcome] refilled daily bars code=%s anchor=%s saved=%s source=%s",
+                refill_code,
+                anchor_date,
+                saved,
+                source,
+            )
+        except Exception as exc:  # noqa: BLE001 - fail soft by design
+            logger.warning("[DecisionSignalOutcome] daily refill failed (%s): %s", refill_code, exc)
+
     def _evaluate_signal_horizon(self, signal: DecisionSignalRecord, horizon: str) -> Dict[str, Any]:
         base = self._snapshot_fields(signal, horizon)
         direction = self._direction_for_action(signal.action)
@@ -412,7 +547,48 @@ class DecisionSignalOutcomeService:
             return self._unable_fields(base, reason="missing_anchor_date", direction_expected=direction)
 
         start_bar = self.stock_repo.get_daily_on_date(code=signal.stock_code, target_date=anchor_date)
-        start_price = getattr(start_bar, "close", None)
+        if self._refill_enabled and self._bars_are_inadequate(
+            signal.stock_code, anchor_date, horizon, eval_days, start_bar
+        ):
+            # Self-heal a gap in stock_daily rather than recording a permanent
+            # "unable" for what is only a missing-data problem. BacktestService
+            # has done this since it was written (_try_fill_daily_data, called
+            # from run_backtest); this path had no equivalent, so whenever the
+            # scheduled analysis jobs stopped running, bars went stale and
+            # already-recorded signals could never mature. Verified 2026-08-24:
+            # outcomes sat at insufficient_forward_bars until bars were
+            # backfilled by hand.
+            self._try_fill_daily_data(
+                code=signal.stock_code,
+                anchor_date=anchor_date,
+                eval_window_days=eval_days,
+            )
+            start_bar = self.stock_repo.get_daily_on_date(
+                code=signal.stock_code, target_date=anchor_date
+            )
+
+        if horizon == "intraday":
+            # Same-day proxy, not a true intraday-bar evaluation: no sub-daily
+            # historical data source is wired in yet (tracked separately as a
+            # forecasting-granularity gap). get_forward_bars() excludes the
+            # anchor day by design and is built for swing/EOD semantics (enter
+            # at close, evaluate N days later) — wrong for a same-day signal.
+            # Entry = anchor day's open; the "forward window" is that SAME
+            # day's own bar, i.e. a forced same-day square-off. Stop-loss and
+            # take-profit hit ordering within that single bar is still
+            # unresolvable from daily OHLC alone (BacktestEngine falls back to
+            # its documented ambiguous/stop-loss-first assumption) — this
+            # fixes the window being wrong, not the intraday ordering gap.
+            start_price = getattr(start_bar, "open", None)
+            forward_bars = [start_bar] if start_bar is not None else []
+        else:
+            start_price = getattr(start_bar, "close", None)
+            forward_bars = self.stock_repo.get_forward_bars(
+                code=signal.stock_code,
+                analysis_date=anchor_date,
+                eval_window_days=eval_days,
+            )
+
         if start_price is None:
             return self._unable_fields(
                 base,
@@ -430,12 +606,6 @@ class DecisionSignalOutcomeService:
                 eval_window_days=eval_days,
                 start_price=start_price,
             )
-
-        forward_bars = self.stock_repo.get_forward_bars(
-            code=signal.stock_code,
-            analysis_date=anchor_date,
-            eval_window_days=eval_days,
-        )
         evaluation = BacktestEngine.evaluate_decision_signal(
             direction_expected=direction,
             anchor_date=anchor_date,
@@ -443,7 +613,7 @@ class DecisionSignalOutcomeService:
             forward_bars=forward_bars,
             config=EvaluationConfig(
                 eval_window_days=eval_days,
-                neutral_band_pct=2.0,
+                neutral_band_pct=self._neutral_band_pct_for(horizon),
                 engine_version=DECISION_SIGNAL_OUTCOME_ENGINE_VERSION,
             ),
         )
@@ -464,14 +634,42 @@ class DecisionSignalOutcomeService:
         }
 
     @staticmethod
+    def _neutral_band_pct_for(horizon: str) -> float:
+        """Neutral band for one horizon, from config.
+
+        Previously hardcoded to 2.0 here, which ignored the configured
+        ``BACKTEST_NEUTRAL_BAND_PCT`` that the rest of the codebase already
+        honours (see ``backtest_service``). Falls back to the flat value when
+        no per-horizon override is set, so an unconfigured deployment behaves
+        exactly as before.
+        """
+        try:
+            from src.config import get_config
+
+            config = get_config()
+        except Exception:  # noqa: BLE001 - config must never break evaluation
+            return 2.0
+
+        by_horizon = getattr(config, "backtest_neutral_band_pct_by_horizon", None) or {}
+        flat = float(getattr(config, "backtest_neutral_band_pct", 2.0))
+        try:
+            return float(by_horizon.get(horizon, flat))
+        except (TypeError, ValueError):
+            return flat
+
+    @staticmethod
     def _direction_for_action(action: Optional[str]) -> Optional[str]:
-        if action in {"buy", "add"}:
-            return "up"
-        if action == "hold":
-            return "not_down"
-        if action in {"reduce", "sell", "avoid"}:
-            return "not_up"
-        return None
+        """Map a canonical action to an expected direction, or None if it has none.
+
+        Every member of ``DecisionAction`` must appear in exactly one of
+        ``DIRECTION_BY_ACTION`` or ``NON_DIRECTIONAL_ACTIONS``; see
+        ``test_every_decision_action_is_explicitly_classified``. Falling
+        through silently is what previously let a whole action class go
+        permanently unscored without anything reporting it.
+        """
+        if action in NON_DIRECTIONAL_ACTIONS:
+            return None
+        return DIRECTION_BY_ACTION.get(action or "")
 
     def _snapshot_fields(self, signal: DecisionSignalRecord, horizon: str) -> Dict[str, Any]:
         data_quality_level = self._data_quality_level(signal)
@@ -806,11 +1004,11 @@ class DecisionSignalOutcomeService:
         if not cls._is_positive_finite(row.start_price):
             return None
         start_price = float(row.start_price)
-        if row.action in {"buy", "add", "hold", "watch", "alert"}:
+        if row.action in LONG_SIDE_EXCURSION_ACTIONS:
             if not cls._is_positive_finite(row.min_low):
                 return None
             return max(0.0, (start_price - float(row.min_low)) / start_price * 100)
-        if row.action in {"sell", "reduce", "avoid"}:
+        if row.action in SHORT_SIDE_EXCURSION_ACTIONS:
             if not cls._is_positive_finite(row.max_high):
                 return None
             return max(0.0, (float(row.max_high) - start_price) / start_price * 100)

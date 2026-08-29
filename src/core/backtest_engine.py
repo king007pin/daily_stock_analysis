@@ -21,6 +21,10 @@ class DailyBarLike(Protocol):
     """Protocol for objects representing a daily OHLC bar."""
 
     date: date
+    # Optional so that existing bar sources without an open still satisfy the
+    # protocol. Only the adaptive high/low ordering heuristic reads it, and it
+    # falls back to the conservative fixed ordering when the open is absent.
+    open: Optional[float]
     high: Optional[float]
     low: Optional[float]
     close: Optional[float]
@@ -47,6 +51,11 @@ class EvaluationConfig:
     eval_window_days: int
     neutral_band_pct: float = 2.0
     engine_version: str = "v1"
+    # When both stop-loss and take-profit are touched inside one daily bar,
+    # decide which was reached first by visiting the extreme closest to the
+    # open. Off by default: enabling it changes stored outcomes, so it must be
+    # paired with an engine_version bump. See _evaluate_targets.
+    bar_adaptive_high_low_ordering: bool = False
 
 
 class BacktestEngine:
@@ -169,9 +178,18 @@ class BacktestEngine:
         """Evaluate one historical analysis against forward daily bars.
 
         Notes:
-        - Daily bars cannot determine intraday ordering. If stop-loss and
-          take-profit are both touched in the same bar, we record
-          first_hit="ambiguous" and assume stop-loss first for simulated exit.
+        - Daily bars do not contain the intra-bar path, so when stop-loss and
+          take-profit are both touched inside one bar the ordering cannot be
+          known. Two resolutions are available:
+          * Default (``bar_adaptive_high_low_ordering=False``): record
+            first_hit="ambiguous" and assume stop-loss first — conservative,
+            deterministic, and independent of where the bar opened.
+          * ``bar_adaptive_high_low_ordering=True``: assume the bar reached the
+            extreme nearest its open first, resolving first_hit to
+            "take_profit" or "stop_loss" with exit_reason "adaptive_*".
+            Still a heuristic, but one correlated with the bar's shape.
+          Switching between them changes stored outcomes, so pair it with an
+          engine_version bump.
         """
 
         if start_price is None or start_price <= 0:
@@ -233,6 +251,9 @@ class BacktestEngine:
             take_profit=take_profit,
             window_bars=window_bars,
             end_close=end_close,
+            adaptive_high_low_ordering=bool(
+                getattr(config, "bar_adaptive_high_low_ordering", False)
+            ),
         )
 
         simulated_entry_price = start_price if position == "long" else None
@@ -634,6 +655,16 @@ class BacktestEngine:
                 return "loss", False
             return "neutral", None
 
+        # Mirror image of not_down. Previously absent here, which silently
+        # routed every defensive call into the "flat" branch below and made
+        # this classifier disagree with _classify_signal_outcome.
+        if direction_expected == "not_up":
+            if r <= 0:
+                return "win", True
+            if r >= band:
+                return "loss", False
+            return "neutral", None
+
         # flat
         if abs(r) <= band:
             return "win", True
@@ -667,10 +698,17 @@ class BacktestEngine:
                 return "miss", False
             return "neutral", None
 
+        # Mirror image of not_down: hit below zero, miss beyond +band, neutral
+        # in between. The previous form ("hit" for any r <= band, with no
+        # neutral branch at all) scored a defensive call as correct even when
+        # the stock rallied by almost the full band, which inflated the hit
+        # rate on every sell/reduce/avoid signal.
         if direction_expected == "not_up":
-            if r <= band:
+            if r <= 0:
                 return "hit", True
-            return "miss", False
+            if r >= band:
+                return "miss", False
+            return "neutral", None
 
         return None, None
 
@@ -684,6 +722,43 @@ class BacktestEngine:
             return None
         return number if math.isfinite(number) else None
 
+    @staticmethod
+    def _adaptive_first_extreme(bar: DailyBarLike) -> Optional[str]:
+        """Which extreme a bar is assumed to have reached first: "high", "low", or None.
+
+        Heuristic: the bar is assumed to visit whichever extreme sits closest to
+        its open before travelling to the other one. Open nearer the high implies
+        Open -> High -> Low -> Close; open nearer the low implies
+        Open -> Low -> High -> Close.
+
+        This is a **deterministic heuristic, not a reconstruction of the actual
+        trade sequence** — daily OHLC does not contain the path. It replaces an
+        unconditional stop-first assumption with one that at least correlates
+        with where the bar started. Technique adapted from NautilusTrader's
+        ``bar_adaptive_high_low_ordering`` venue option.
+
+        Returns None when the open, high or low is missing, or when the open is
+        exactly equidistant, so the caller keeps its conservative fallback
+        rather than breaking the tie arbitrarily.
+        """
+        open_price = getattr(bar, "open", None)
+        high = bar.high
+        low = bar.low
+        if open_price is None or high is None or low is None:
+            return None
+
+        try:
+            distance_to_high = abs(float(high) - float(open_price))
+            distance_to_low = abs(float(open_price) - float(low))
+        except (TypeError, ValueError):
+            return None
+
+        if not (math.isfinite(distance_to_high) and math.isfinite(distance_to_low)):
+            return None
+        if distance_to_high == distance_to_low:
+            return None
+        return "high" if distance_to_high < distance_to_low else "low"
+
     @classmethod
     def _evaluate_targets(
         cls,
@@ -693,6 +768,7 @@ class BacktestEngine:
         take_profit: Optional[float],
         window_bars: List[DailyBarLike],
         end_close: Optional[float],
+        adaptive_high_low_ordering: bool = False,
     ) -> tuple[
         Optional[bool],
         Optional[bool],
@@ -751,9 +827,27 @@ class BacktestEngine:
             first_hit_days = idx
 
             if stop_hit and tp_hit:
-                first_hit = "ambiguous"
-                exit_price = stop_loss
-                exit_reason = "ambiguous_stop_loss"
+                resolved = (
+                    cls._adaptive_first_extreme(bar)
+                    if adaptive_high_low_ordering
+                    else None
+                )
+                if resolved == "high":
+                    # Open sat nearer the high, so the bar is assumed to have
+                    # traded up before it traded down: the take-profit fills.
+                    first_hit = "take_profit"
+                    exit_price = take_profit
+                    exit_reason = "adaptive_take_profit"
+                elif resolved == "low":
+                    first_hit = "stop_loss"
+                    exit_price = stop_loss
+                    exit_reason = "adaptive_stop_loss"
+                else:
+                    # Heuristic disabled, or the bar has no usable open.
+                    # Fall back to the conservative stop-first assumption.
+                    first_hit = "ambiguous"
+                    exit_price = stop_loss
+                    exit_reason = "ambiguous_stop_loss"
                 break
 
             if stop_hit:

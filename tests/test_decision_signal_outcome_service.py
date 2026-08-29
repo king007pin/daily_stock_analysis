@@ -10,7 +10,10 @@ from datetime import date, datetime
 import pytest
 
 from src.config import Config
-from src.services.decision_signal_outcome_service import DecisionSignalOutcomeService
+from src.services.decision_signal_outcome_service import (
+    DECISION_SIGNAL_OUTCOME_ENGINE_VERSION,
+    DecisionSignalOutcomeService,
+)
 from src.storage import DatabaseManager, DecisionSignalOutcomeRecord, DecisionSignalRecord, StockDaily
 
 
@@ -120,7 +123,7 @@ def _seed_calibration_outcomes(
             session.add(DecisionSignalOutcomeRecord(
                 signal_id=signal.id,
                 horizon=horizon,
-                engine_version="decision-signal-v1",
+                engine_version=DECISION_SIGNAL_OUTCOME_ENGINE_VERSION,
                 eval_status="completed",
                 outcome=outcome_value,
                 direction_expected="not_up" if action in {"sell", "reduce", "avoid"} else "up",
@@ -479,41 +482,81 @@ def test_stock_code_filter_uses_hk_aliases_without_widening_market_filter(isolat
 
 
 def test_not_up_uses_defensive_direction_not_down_direction(isolated_db) -> None:
+    """not_up mirrors not_down: hit at/below zero, neutral inside the band, miss beyond it.
+
+    A defensive call on a stock that then drifts up by less than the neutral
+    band is not a correct call — it is unresolved. Scoring it as a hit (the
+    behaviour before this was fixed) inflated the hit rate of every
+    sell/reduce/avoid signal.
+    """
     reduce_hit_id = _add_signal(isolated_db, code="600519", action="reduce", horizon="3d")
+    reduce_neutral_id = _add_signal(isolated_db, code="601398", action="reduce", horizon="3d")
     reduce_miss_id = _add_signal(isolated_db, code="000001", action="reduce", horizon="3d")
-    _seed_bars(isolated_db, code="600519", closes=[100.5, 101.0, 101.5])
+    _seed_bars(isolated_db, code="600519", closes=[99.5, 99.0, 98.5])
+    _seed_bars(isolated_db, code="601398", closes=[100.5, 101.0, 101.5])
     _seed_bars(isolated_db, code="000001", closes=[101.0, 102.0, 103.0])
     service = DecisionSignalOutcomeService(db_manager=isolated_db)
 
     hit = service.run_outcomes(signal_id=reduce_hit_id)["items"][0]
+    neutral = service.run_outcomes(signal_id=reduce_neutral_id)["items"][0]
     miss = service.run_outcomes(signal_id=reduce_miss_id)["items"][0]
 
     assert hit["direction_expected"] == "not_up"
     assert hit["outcome"] == "hit"
+    assert neutral["direction_expected"] == "not_up"
+    assert neutral["outcome"] == "neutral"
     assert miss["direction_expected"] == "not_up"
     assert miss["outcome"] == "miss"
 
 
 def test_unable_reasons_are_persisted_for_non_directional_and_unsupported_horizon(isolated_db) -> None:
     watch_id = _add_signal(isolated_db, action="watch", horizon="3d")
-    intraday_buy_id = _add_signal(isolated_db, code="000001", action="buy", horizon="intraday")
+    # "swing"/"long" are declared HORIZONS labels but still have no entry in
+    # SUPPORTED_OUTCOME_HORIZONS (unlike "intraday", fixed 2026-08-17) — a
+    # genuinely still-unsupported horizon for this regression guard.
+    swing_buy_id = _add_signal(isolated_db, code="000001", action="buy", horizon="swing")
     _seed_bars(isolated_db, code="600519", closes=[103, 104, 105])
     _seed_bars(isolated_db, code="000001", closes=[103, 104, 105])
     service = DecisionSignalOutcomeService(db_manager=isolated_db)
 
     watch = service.run_outcomes(signal_id=watch_id)["items"][0]
-    intraday = service.run_outcomes(signal_id=intraday_buy_id)["items"][0]
+    swing = service.run_outcomes(signal_id=swing_buy_id)["items"][0]
     watch_skipped = service.run_outcomes(signal_id=watch_id)
-    intraday_skipped = service.run_outcomes(signal_id=intraday_buy_id)
+    swing_skipped = service.run_outcomes(signal_id=swing_buy_id)
 
     assert watch["eval_status"] == "unable"
     assert watch["unable_reason"] == "non_directional_action"
-    assert intraday["eval_status"] == "unable"
-    assert intraday["unable_reason"] == "unsupported_horizon"
+    assert swing["eval_status"] == "unable"
+    assert swing["unable_reason"] == "unsupported_horizon"
     assert watch_skipped["evaluated"] == 0
     assert watch_skipped["skipped"] == 1
-    assert intraday_skipped["evaluated"] == 0
-    assert intraday_skipped["skipped"] == 1
+    assert swing_skipped["evaluated"] == 0
+    assert swing_skipped["skipped"] == 1
+
+
+def test_intraday_horizon_evaluates_against_same_day_bar_not_forward_bars(isolated_db) -> None:
+    """Regression guard for the 2026-08-17 fix: "intraday" used to be entirely
+    unsupported (unable_reason="unsupported_horizon", the same bucket "swing"
+    is still in above). It now evaluates using the anchor day's own OPEN as
+    entry and that SAME day's own bar as the forced-exit window — not
+    get_forward_bars(), which excludes the anchor day and is built for
+    swing/EOD semantics. A day-trade signal must not silently produce zero
+    calibration data forever.
+    """
+    intraday_buy_id = _add_signal(isolated_db, code="000001", action="buy", horizon="intraday")
+    # Anchor bar (seeded by _seed_bars for 2024-01-02, matching the signal's
+    # default session_date): open=100, high=105, low=99, close=103.
+    with isolated_db.session_scope() as session:
+        session.add(StockDaily(code="000001", date=date(2024, 1, 2), open=100.0, high=105.0, low=99.0, close=103.0))
+    service = DecisionSignalOutcomeService(db_manager=isolated_db)
+
+    intraday = service.run_outcomes(signal_id=intraday_buy_id)["items"][0]
+
+    assert intraday["eval_status"] == "completed"
+    assert intraday["unable_reason"] is None
+    assert intraday["eval_window_days"] == 1
+    assert intraday["start_price"] == 100.0
+    assert intraday["end_close"] == 103.0
 
 
 def test_watch_and_alert_outcomes_remain_unable_without_market_reads(isolated_db) -> None:
@@ -757,3 +800,59 @@ def test_batch_uses_oldest_retryable_horizon_timestamp_for_signal_order(isolated
 
     assert result["updated"] == 2
     assert {item["signal_id"] for item in result["items"]} == {multi_horizon_id}
+
+
+def test_every_decision_action_is_explicitly_classified() -> None:
+    """No action may fall through the direction mapping silently.
+
+    A ninth action added to the DecisionAction literal without a deliberate
+    decision about its direction would otherwise be scored as
+    `non_directional_action` forever, with nothing reporting it — which is
+    exactly how `watch` came to account for 90% of stored signals while the
+    outcome table stayed empty.
+    """
+    from typing import get_args
+
+    from src.schemas.decision_action import DecisionAction
+    from src.services.decision_signal_outcome_service import (
+        DIRECTION_BY_ACTION,
+        NON_DIRECTIONAL_ACTIONS,
+    )
+
+    declared = set(get_args(DecisionAction))
+    classified = set(DIRECTION_BY_ACTION) | set(NON_DIRECTIONAL_ACTIONS)
+
+    assert declared == classified, f"unclassified actions: {declared ^ classified}"
+    assert not (set(DIRECTION_BY_ACTION) & set(NON_DIRECTIONAL_ACTIONS))
+    assert set(DIRECTION_BY_ACTION.values()) <= {"up", "not_down", "not_up"}
+
+
+def test_non_directional_actions_are_not_scored(isolated_db) -> None:
+    """`watch` must stay unscored — scoring it as not_down fabricates ~78% wins."""
+    service = DecisionSignalOutcomeService(db_manager=isolated_db)
+
+    assert service._direction_for_action("watch") is None
+    assert service._direction_for_action("alert") is None
+    assert service._direction_for_action("buy") == "up"
+    assert service._direction_for_action("avoid") == "not_up"
+
+
+def test_excursion_and_direction_mappings_cover_all_actions_consistently() -> None:
+    """The two action mappings differ on purpose; both must still be total."""
+    from typing import get_args
+
+    from src.schemas.decision_action import DecisionAction
+    from src.services.decision_signal_outcome_service import (
+        DIRECTION_BY_ACTION,
+        LONG_SIDE_EXCURSION_ACTIONS,
+        SHORT_SIDE_EXCURSION_ACTIONS,
+    )
+
+    declared = set(get_args(DecisionAction))
+
+    assert LONG_SIDE_EXCURSION_ACTIONS | SHORT_SIDE_EXCURSION_ACTIONS == declared
+    assert not (LONG_SIDE_EXCURSION_ACTIONS & SHORT_SIDE_EXCURSION_ACTIONS)
+    # A directional action must never sit on the opposite excursion side.
+    assert SHORT_SIDE_EXCURSION_ACTIONS == {
+        action for action, direction in DIRECTION_BY_ACTION.items() if direction == "not_up"
+    }

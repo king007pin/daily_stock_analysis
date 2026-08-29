@@ -12,6 +12,7 @@ from src.agent.protocols import normalize_strategy_signal
 
 
 SUPPORTED_SKILL_OUTCOME_HORIZONS = {
+    "intraday": 1,
     "1d": 1,
     "3d": 3,
     "5d": 5,
@@ -66,11 +67,18 @@ class SkillOpinionOutcomeEvaluator:
         if start_bar is None:
             return cls._pending("missing_start_bar", analysis_date=analysis_date)
 
-        raw_start_price = getattr(start_bar, "close", None)
+        # "intraday" reuses close-based swing semantics for everything except
+        # entry price: callers pass forward_bars=[start_bar] (same-day, forced
+        # square-off proxy) rather than get_forward_bars()'s day-after bars —
+        # see skill_opinion_outcome_service._evaluate_candidate. Entry must be
+        # the day's OPEN, not its close, or start_price == end_close always.
+        entry_field = "open" if horizon == "intraday" else "close"
+        raw_start_price = getattr(start_bar, entry_field, None)
         start_price = cls._positive_finite_float(raw_start_price)
         start_trade_date = cls._bar_date(start_bar)
         if start_price is None:
-            reason = "missing_start_close" if raw_start_price is None else "invalid_start_price"
+            missing_reason = "missing_start_open" if horizon == "intraday" else "missing_start_close"
+            reason = missing_reason if raw_start_price is None else "invalid_start_price"
             return cls._pending(
                 reason,
                 analysis_date=analysis_date,

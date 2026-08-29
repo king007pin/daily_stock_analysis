@@ -1249,7 +1249,7 @@ class SkillOpinionOutcomeRecord(Base):
             name='uix_skill_opinion_outcome_key',
         ),
         CheckConstraint(
-            "horizon IN ('1d', '3d', '5d', '10d')",
+            "horizon IN ('intraday', '1d', '3d', '5d', '10d')",
             name='ck_skill_opinion_outcome_horizon',
         ),
         CheckConstraint(
@@ -1375,6 +1375,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
             self._ensure_intelligence_items_unique_index()
+            self._ensure_skill_opinion_outcome_horizon_constraint()
 
             self._initialized = True
             logger.info(f"数据库初始化完成: {db_url}")
@@ -1681,6 +1682,89 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                     f"intelligence_items ({index_columns})"
                 )
             )
+
+    def _ensure_skill_opinion_outcome_horizon_constraint(self) -> None:
+        """Widen skill_opinion_outcomes' horizon CHECK constraint to include
+        'intraday' on existing SQLite DBs.
+
+        Base.metadata.create_all() only creates missing tables — it never
+        alters an existing table's CHECK constraint, so DBs created before
+        the 2026-08-17 intraday-horizon fix would still reject every intraday
+        skill-opinion outcome write with a CHECK constraint IntegrityError,
+        even though the Python-level SUPPORTED_SKILL_OUTCOME_HORIZONS fix
+        already lets evaluation reach that point. SQLite has no ALTER TABLE
+        for constraints, so this rebuilds the table (rename -> recreate from
+        the current model -> copy -> drop), mirroring the existing
+        _rebuild_intelligence_items_table() migration pattern.
+        """
+
+        if not self._is_sqlite_engine:
+            return
+        table_name = SkillOpinionOutcomeRecord.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+
+        try:
+            with self._engine.connect() as connection:
+                ddl = connection.execute(
+                    text("SELECT sql FROM sqlite_master WHERE type='table' AND name=:name"),
+                    {"name": table_name},
+                ).scalar()
+        except Exception as exc:
+            logger.warning(
+                "[SkillOpinionOutcome] failed to inspect horizon constraint DDL; "
+                "skip migration/repair: %s",
+                exc,
+            )
+            return
+
+        if not ddl or "'intraday'" in ddl:
+            return  # already migrated, or DDL unreadable — don't guess
+
+        logger.info(
+            "Rebuilding %s to widen the horizon CHECK constraint to include 'intraday'.",
+            table_name,
+        )
+        # Build the replacement under a fresh name first, then swap — renaming
+        # the live table in place before recreating under its original name
+        # collides with that table's own still-attached column indexes
+        # (SQLite does not rename indexes when a table is renamed), which
+        # aborts the rebuild after the original data has already been moved
+        # aside. This mirrors the proven-safe _rebuild_intelligence_items_table
+        # pattern (temp name -> copy data -> drop original -> rename into place).
+        columns = [column.name for column in SkillOpinionOutcomeRecord.__table__.columns]
+        select_clause = ", ".join(f'"{column}"' for column in columns)
+        temporary_table = f"{table_name}_recreate_tmp_{int(time.time() * 1_000_000_000)}"
+
+        # Materialize both collections before calling .copy() on any of them —
+        # .copy() mutates shared SQLAlchemy registries, so copying while still
+        # iterating the source Table's live `constraints` set raises
+        # "Set changed size during iteration".
+        source_columns = list(SkillOpinionOutcomeRecord.__table__.columns)
+        source_constraints = [
+            constraint
+            for constraint in list(SkillOpinionOutcomeRecord.__table__.constraints)
+            if isinstance(constraint, (CheckConstraint, UniqueConstraint))
+        ]
+        tmp_metadata = MetaData()
+        tmp_table = Table(
+            temporary_table,
+            tmp_metadata,
+            *(column.copy() for column in source_columns),
+            *(constraint.copy() for constraint in source_constraints),
+        )
+        with self._engine.begin() as connection:
+            connection.execute(text(f'DROP TABLE IF EXISTS "{temporary_table}"'))
+            tmp_table.create(connection)
+            connection.execute(
+                text(
+                    f'INSERT INTO "{temporary_table}" ({select_clause}) '
+                    f'SELECT {select_clause} FROM "{table_name}"'
+                )
+            )
+            connection.execute(text(f'DROP TABLE "{table_name}"'))
+            connection.execute(text(f'ALTER TABLE "{temporary_table}" RENAME TO "{table_name}"'))
 
     def _list_sqlite_unique_indexes(self, table_name: str):
         with self._engine.connect() as connection:

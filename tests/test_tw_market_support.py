@@ -150,3 +150,24 @@ def test_tw_is_first_class_on_write_paths() -> None:
     assert DecisionSignalService._normalize_market("tw") == "tw"
     assert "tw" in VALID_MARKETS
     assert "tw" in _ALLOWED_MARKETS
+
+
+def test_in_is_first_class_on_write_paths() -> None:
+    """India NSE (`in`) is a first-class market on the decision-signal / portfolio /
+    intelligence write paths, matching jp/kr/tw.
+
+    Regression guard: found live 2026-08-17 — a real automated run against 10 NSE
+    stocks logged "Skip decision signal extraction: market=in not yet wired for
+    signals" on every one. get_market_for_stock already recognized `in`; only
+    VALID_MARKETS (and intelligence_service._ALLOWED_MARKETS) lagged behind,
+    making `in` the only yfinance-supported market that could be analyzed but
+    never produced a decision signal.
+    """
+    from src.services.decision_signal_service import DecisionSignalService
+    from src.services.portfolio_service import VALID_MARKETS
+    from src.services.intelligence_service import _ALLOWED_MARKETS
+
+    assert get_market_for_stock("RELIANCE.NS") == "in"  # data layer recognizes in
+    assert DecisionSignalService._normalize_market("in") == "in"
+    assert "in" in VALID_MARKETS
+    assert "in" in _ALLOWED_MARKETS

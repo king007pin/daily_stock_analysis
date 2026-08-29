@@ -31,7 +31,11 @@ EXEMPT_PATHS = frozenset({
 def _path_exempt(path: str) -> bool:
     """Check if path is exempt from auth."""
     normalized = path.rstrip("/") or "/"
-    return normalized in EXEMPT_PATHS
+    if normalized in EXEMPT_PATHS:
+        return True
+    if normalized.startswith("/api/v1/bot/") or normalized == "/api/v1/bot":
+        return True
+    return False
 
 
 class AuthMiddleware(BaseHTTPMiddleware):

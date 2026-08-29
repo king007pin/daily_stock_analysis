@@ -162,6 +162,33 @@ def test_evaluator_uses_sample_signal_and_zero_is_miss(
     assert result.direction_correct is expected_correct
 
 
+def test_evaluator_intraday_uses_open_as_entry_not_close() -> None:
+    """Regression guard for the 2026-08-17 fix: "intraday" was previously
+    entirely unsupported (unable_reason="unsupported_horizon", mirroring the
+    identical gap fixed the same day in decision_signal_outcome_service.py).
+    Callers must pass forward_bars=[start_bar] (the same day, forced
+    square-off proxy) — get_forward_bars()-sourced bars would evaluate the
+    day AFTER the signal, which is wrong for a same-day trade. Entry price
+    must be the day's OPEN; using its close (like every other horizon) would
+    make start_price == end_close always, since both come from the same bar.
+    """
+    same_day = SimpleNamespace(date=date(2024, 1, 2), open=100.0, close=103.0)
+
+    result = SkillOpinionOutcomeEvaluator.evaluate(
+        signal="buy",
+        horizon="intraday",
+        analysis_date=date(2024, 1, 2),
+        start_bar=same_day,
+        forward_bars=[same_day],
+    )
+
+    assert result.eval_status == "evaluated"
+    assert result.start_price == 100.0
+    assert result.end_close == 103.0
+    assert result.outcome == "hit"
+    assert result.direction_correct is True
+
+
 def test_evaluator_hold_is_observational() -> None:
     result = SkillOpinionOutcomeEvaluator.evaluate(
         signal="hold",
@@ -199,6 +226,32 @@ def test_effective_daily_bar_date_requires_exact_start_bar(isolated_db) -> None:
     assert item["eval_status"] == "pending"
     assert item["unable_reason"] == "missing_start_bar"
     assert item["start_trade_date"] is None
+
+
+def test_service_evaluates_intraday_horizon_end_to_end(isolated_db) -> None:
+    """Same fix as test_evaluator_intraday_uses_open_as_entry_not_close, but
+    through the full service path (_evaluate_candidate -> resolve_stock_daily_window
+    -> SkillOpinionOutcomeEvaluator.evaluate), confirming the caller-side
+    forward_bars=[start_bar] substitution is actually wired, not just the
+    evaluator's own open/close branch in isolation.
+    """
+    _, sample_id = _add_sample(
+        isolated_db,
+        signal="buy",
+        context_snapshot=_effective_snapshot("2024-01-02"),
+    )
+    with isolated_db.session_scope() as session:
+        session.add(StockDaily(code="600519", date=date(2024, 1, 2), open=100.0, high=105.0, low=99.0, close=103.0))
+
+    item = SkillOpinionOutcomeService(db_manager=isolated_db).run_outcomes(
+        sample_id=sample_id,
+        horizons=["intraday"],
+    )["items"][0]
+
+    assert item["eval_status"] == "evaluated"
+    assert item["start_price"] == 100.0
+    assert item["end_close"] == 103.0
+    assert item["outcome"] == "hit"
 
 
 @pytest.mark.parametrize(

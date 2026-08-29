@@ -258,13 +258,20 @@ class CommandDispatcher:
 
         return result_holder.get("response", BotResponse.error_response("命令执行失败"))
 
+    def _is_english_mode(self) -> bool:
+        try:
+            from src.config import get_config
+            return getattr(get_config(), "report_language", "zh") == "en"
+        except Exception:
+            return False
+
     def _prepare_dispatch(self, message: BotMessage) -> tuple[Optional[str], List[str], Optional[BotCommand], Optional[BotResponse]]:
         """Run shared dispatch pre-checks for sync/async entrypoints."""
+        is_en = self._is_english_mode()
         if not self._rate_limiter.is_allowed(message.user_id):
             remaining_time = self._rate_limiter.window_seconds
-            return None, [], None, BotResponse.error_response(
-                f"请求过于频繁，请 {remaining_time} 秒后再试"
-            )
+            err = f"Rate limit reached. Please wait {remaining_time}s." if is_en else f"请求过于频繁，请 {remaining_time} 秒后再试"
+            return None, [], None, BotResponse.error_response(err)
 
         cmd_name, args = message.get_command_and_args(self.command_prefix)
         if cmd_name is None:
@@ -274,24 +281,28 @@ class CommandDispatcher:
 
         command = self.get_command(cmd_name)
         if command is None:
-            return cmd_name, args, None, BotResponse.error_response(
-                f"未知命令: {cmd_name}\n"
-                f"发送 `{self.command_prefix}help` 查看可用命令。"
-            )
+            if is_en:
+                err = f"Unknown command: `{cmd_name}`\nType `{self.command_prefix}help` to view available commands."
+            else:
+                err = f"未知命令: {cmd_name}\n发送 `{self.command_prefix}help` 查看可用命令。"
+            return cmd_name, args, None, BotResponse.error_response(err)
 
         if command.admin_only and not self.is_admin(message.user_id):
-            return cmd_name, args, None, BotResponse.error_response("此命令需要管理员权限")
+            err = "This command requires admin privileges." if is_en else "此命令需要管理员权限"
+            return cmd_name, args, None, BotResponse.error_response(err)
 
         error_msg = command.validate_args(args)
         if error_msg:
+            usage_label = "Usage" if is_en else "用法"
             return cmd_name, args, None, BotResponse.error_response(
-                f"{error_msg}\n用法: `{command.usage}`"
+                f"{error_msg}\n{usage_label}: `{command.usage}`"
             )
 
         return cmd_name, args, command, None
 
     def _dispatch_sync(self, message: BotMessage) -> BotResponse:
         """Pure synchronous dispatch path for webhook/stream integrations."""
+        is_en = self._is_english_mode()
         cmd_name, args, command, early_response = self._prepare_dispatch(message)
         if early_response is not None:
             return early_response
@@ -301,6 +312,11 @@ class CommandDispatcher:
             if nl_result is not None:
                 return nl_result
             if message.mentioned:
+                if is_en:
+                    return BotResponse.text_response(
+                        "Hello! I am Daily Quants Stock Assistant.\n"
+                        f"Type `{self.command_prefix}help` to view available commands."
+                    )
                 return BotResponse.text_response(
                     "你好！我是股票分析助手。\n"
                     f"发送 `{self.command_prefix}help` 查看可用命令。"
@@ -308,7 +324,8 @@ class CommandDispatcher:
             return BotResponse.text_response("")
 
         if command is None:
-            return BotResponse.error_response("命令执行失败")
+            err = "Command execution failed" if is_en else "命令执行失败"
+            return BotResponse.error_response(err)
 
         try:
             response = command.execute(message, args)
@@ -317,7 +334,8 @@ class CommandDispatcher:
         except Exception as e:
             logger.error(f"[Dispatcher] 命令 {cmd_name} 执行失败: {e}")
             logger.exception(e)
-            return BotResponse.error_response(f"命令执行失败: {str(e)[:100]}")
+            err_prefix = "Command execution failed" if is_en else "命令执行失败"
+            return BotResponse.error_response(f"{err_prefix}: {str(e)[:100]}")
 
     async def dispatch_async(self, message: BotMessage) -> BotResponse:
         """

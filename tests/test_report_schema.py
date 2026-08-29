@@ -47,6 +47,47 @@ class TestAnalysisReportSchema(unittest.TestCase):
         self.assertEqual(schema.sentiment_score, 75)
         self.assertIsNotNone(schema.dashboard)
 
+    def test_intelligence_accepts_news_sentiment_score(self) -> None:
+        """news_sentiment_score (Phase 04) is distinct from the top-level sentiment_score —
+        a dedicated news-only polarity score, not a duplicate of the holistic call score."""
+        data = {
+            "stock_name": "RELIANCE INDUSTRIES LTD",
+            "sentiment_score": 59,
+            "trend_prediction": "Bullish",
+            "operation_advice": "Hold and watch",
+            "dashboard": {
+                "intelligence": {
+                    "sentiment_summary": "Positive earnings coverage this week",
+                    "news_sentiment_score": 72,
+                },
+            },
+        }
+        schema = AnalysisReportSchema.model_validate(data)
+        self.assertEqual(schema.dashboard.intelligence.news_sentiment_score, 72)
+        self.assertEqual(schema.sentiment_score, 59)  # unaffected, still the holistic score
+
+    def test_intelligence_news_sentiment_score_out_of_range_rejected(self) -> None:
+        data = {
+            "stock_name": "测试",
+            "sentiment_score": 50,
+            "trend_prediction": "震荡",
+            "operation_advice": "观望",
+            "dashboard": {"intelligence": {"news_sentiment_score": 150}},
+        }
+        with self.assertRaises(Exception):
+            AnalysisReportSchema.model_validate(data)
+
+    def test_intelligence_news_sentiment_score_optional(self) -> None:
+        data = {
+            "stock_name": "测试",
+            "sentiment_score": 50,
+            "trend_prediction": "震荡",
+            "operation_advice": "观望",
+            "dashboard": {"intelligence": {"sentiment_summary": "无重大消息"}},
+        }
+        schema = AnalysisReportSchema.model_validate(data)
+        self.assertIsNone(schema.dashboard.intelligence.news_sentiment_score)
+
     def test_schema_allows_optional_fields_missing(self) -> None:
         """Schema accepts minimal valid structure."""
         data = {

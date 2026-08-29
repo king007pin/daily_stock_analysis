@@ -574,11 +574,236 @@ forecast_kronos_tool = ToolDefinition(
 )
 
 
+def _handle_recall_trade_memory(stock_code: str, setup_type: str = "BREAKOUT", top_k: int = 3) -> dict:
+    """Query ChromaDB Vector RAG Memory for historical setup analogues and empirical win rates."""
+    from src.services.memory_service import TradeMemoryService, TradePatternRecord
+
+    if not (stock_code and str(stock_code).strip()):
+        return {"error": "stock_code is required"}
+
+    df = _fetch_trend_data(stock_code)
+    rsi_val = 50.0
+    vol_surge = 1.0
+    ema_diff = 0.0
+
+    if df is not None and len(df) >= 20:
+        closes = df["close"].values
+        diffs = np.diff(closes)
+        gains = diffs[diffs > 0]
+        losses = -diffs[diffs < 0]
+        avg_gain = float(np.mean(gains)) if len(gains) else 0.01
+        avg_loss = float(np.mean(losses)) if len(losses) else 0.01
+        rs = avg_gain / max(0.001, avg_loss)
+        rsi_val = float(100.0 - (100.0 / (1.0 + rs)))
+
+        vols = df["volume"].values
+        vol_surge = float(vols[-1] / max(1.0, np.mean(vols[-20:])))
+        ema20 = float(pd.Series(closes).ewm(span=20).mean().iloc[-1])
+        ema50 = float(pd.Series(closes).ewm(span=50).mean().iloc[-1]) if len(closes) >= 50 else ema20
+        ema_diff = float(((ema20 - ema50) / max(0.01, ema50)) * 100.0)
+
+    market = "NSE" if stock_code.endswith(".NS") else ("US" if not stock_code.isdigit() else "CN")
+
+    current_query = TradePatternRecord(
+        setup_id="query_live",
+        stock_code=stock_code,
+        market=market,
+        setup_type=setup_type,
+        rsi=rsi_val,
+        ema_spread_pct=ema_diff,
+        volume_surge_ratio=vol_surge,
+        kronos_projected_return=5.0,
+        regime_vix_bucket="LOW",
+        outcome_return_pct=0.0,
+        trade_result="PENDING",
+        holding_days=5,
+    )
+
+    service = TradeMemoryService()
+    matches = service.query_similar_setups(current_query, top_k=top_k)
+    return {
+        "stock_code": stock_code,
+        "matched_analogues_count": len(matches),
+        "matches": [m.record.to_dict() for m in matches],
+        "prompt_summary": service.format_memory_prompt_injection(current_query, top_k=top_k),
+    }
+
+
+recall_trade_memory_tool = ToolDefinition(
+    name="recall_trade_memory",
+    description="Query Vector RAG memory (ChromaDB) to retrieve past empirical chart analogues, "
+                "historical trade win/loss outcomes, and realized profit/loss percentages for similar technical patterns.",
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="Stock code (e.g. 'RELIANCE.NS', 'NVDA', 'AAPL')",
+        ),
+        ToolParameter(
+            name="setup_type",
+            type="string",
+            description="Chart pattern / setup type ('BREAKOUT', 'PULLBACK', 'MEAN_REVERSION', 'PENNY_MOMENTUM')",
+            required=False,
+            default="BREAKOUT",
+        ),
+        ToolParameter(
+            name="top_k",
+            type="integer",
+            description="Number of historical analogues to retrieve (default: 3)",
+            required=False,
+            default=3,
+        ),
+    ],
+    handler=_handle_recall_trade_memory,
+    category="analysis",
+    policy=_ANALYSIS_READ_POLICY,
+)
+
+
+def _handle_scrape_live_web_quotes(symbols: str) -> dict:
+    """Scrape 100% verified real-time prices, ratios, and market cap via Scrapling stealth fetcher."""
+    if not (symbols and str(symbols).strip()):
+        return {"error": "symbols is required"}
+
+    from src.services.live_scraper_service import LiveWebScraperService
+    scraper = LiveWebScraperService()
+    
+    sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    results = {}
+    for s in sym_list:
+        clean_s = s.replace(".NS", "").replace(".BO", "").upper()
+        res = scraper.get_live_quote(clean_s, "NSE")
+        results[s] = res
+
+    return {
+        "quotes": results,
+        "scraped_count": len(results),
+        "status": "success",
+    }
+
+
+scrape_live_web_quotes_tool = ToolDefinition(
+    name="scrape_live_web_quotes",
+    description="Scrape real-time live stock prices, day ranges, P/E, and market cap from live financial web pages (Screener.in, Google Finance) via Scrapling stealth browser.",
+    parameters=[
+        ToolParameter(
+            name="symbols",
+            type="string",
+            description="Comma-separated stock symbols (e.g. 'RTNPOWER.NS,IDEA.NS,HAL.NS,NVDA')",
+        ),
+    ],
+    handler=_handle_scrape_live_web_quotes,
+    category="analysis",
+    policy=_ANALYSIS_READ_POLICY,
+)
+
+
+def _handle_scan_pairs_arbitrage(asset_a: str, asset_b: str) -> dict:
+    """Scan cointegration, hedge ratio, and Z-score spread for two assets."""
+    if not (asset_a and asset_b):
+        return {"error": "Both asset_a and asset_b are required"}
+
+    from src.services.history_loader import load_history_df
+    from src.services.stat_arb_service import StatArbService
+
+    df_a, _ = load_history_df(asset_a, days=90)
+    df_b, _ = load_history_df(asset_b, days=90)
+
+    if df_a is None or df_b is None or df_a.empty or df_b.empty:
+        return {"error": f"Insufficient historical data for {asset_a} or {asset_b}"}
+
+    prices_a = df_a["close"]
+    prices_b = df_b["close"]
+
+    service = StatArbService()
+    res = service.calculate_pair_spread(prices_a, prices_b, asset_a, asset_b)
+    return res.to_dict()
+
+
+scan_pairs_arbitrage_tool = ToolDefinition(
+    name="scan_pairs_arbitrage",
+    description="Evaluate cointegration, OLS hedge ratio beta, half-life, and rolling Z-score between two assets for statistical arbitrage pairs trading.",
+    parameters=[
+        ToolParameter(name="asset_a", type="string", description="First stock symbol (e.g. 'TCS.NS')"),
+        ToolParameter(name="asset_b", type="string", description="Second stock symbol (e.g. 'INFY.NS')"),
+    ],
+    handler=_handle_scan_pairs_arbitrage,
+    category="analysis",
+    policy=_ANALYSIS_READ_POLICY,
+)
+
+
+def _handle_get_institutional_flow(fii_cash_cr: float = 0.0, dii_cash_cr: float = 0.0) -> dict:
+    """Get FII/DII institutional net flows and Index Futures Long/Short ratio."""
+    from src.services.macro_radar_service import MacroRadarService
+    service = MacroRadarService()
+    res = service.evaluate_institutional_flows(fii_cash_cr=fii_cash_cr, dii_cash_cr=dii_cash_cr)
+    return res.to_dict()
+
+
+get_institutional_flow_tool = ToolDefinition(
+    name="get_institutional_flow",
+    description="Retrieve FII/DII net cash flow, Index Futures Long/Short ratio, and institutional positioning bias.",
+    parameters=[
+        ToolParameter(name="fii_cash_cr", type="number", description="FII net cash in Crores (optional)", required=False, default=0.0),
+        ToolParameter(name="dii_cash_cr", type="number", description="DII net cash in Crores (optional)", required=False, default=0.0),
+    ],
+    handler=_handle_get_institutional_flow,
+    category="analysis",
+    policy=_ANALYSIS_READ_POLICY,
+)
+
+
+def _handle_optimize_portfolio_weights(symbols: str, method: str = "MAX_SHARPE") -> dict:
+    """Compute optimal portfolio weights using Markowitz tangency or Minimum Variance."""
+    if not (symbols and str(symbols).strip()):
+        return {"error": "symbols is required"}
+
+    from src.services.history_loader import load_history_df
+    from src.services.portfolio_optimizer_service import PortfolioOptimizerService
+
+    sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    returns_dict = {}
+
+    for sym in sym_list:
+        df, _ = load_history_df(sym, days=90)
+        if df is not None and not df.empty and "close" in df.columns:
+            returns_dict[sym] = df["close"].pct_change()
+
+    if not returns_dict:
+        return {"error": "Could not load historical return series for provided symbols"}
+
+    returns_df = pd.DataFrame(returns_dict)
+    service = PortfolioOptimizerService()
+    res = service.optimize_portfolio(returns_df, method=method)
+    return res.to_dict()
+
+
+optimize_portfolio_weights_tool = ToolDefinition(
+    name="optimize_portfolio_weights",
+    description="Calculate optimal asset allocation weights, expected annual return, volatility, Sharpe ratio, and 99% CVaR using Markowitz/Shrinkage optimizer.",
+    parameters=[
+        ToolParameter(name="symbols", type="string", description="Comma-separated stock symbols (e.g. 'RELIANCE.NS,TCS.NS,HAL.NS')"),
+        ToolParameter(name="method", type="string", description="Optimization method ('MAX_SHARPE', 'MIN_VARIANCE', 'EQUAL_WEIGHT')", required=False, default="MAX_SHARPE"),
+    ],
+    handler=_handle_optimize_portfolio_weights,
+    category="analysis",
+    policy=_ANALYSIS_READ_POLICY,
+)
+
+
 ALL_ANALYSIS_TOOLS = [
     analyze_trend_tool,
     calculate_ma_tool,
     get_volume_analysis_tool,
     analyze_pattern_tool,
     forecast_kronos_tool,
+    recall_trade_memory_tool,
+    scrape_live_web_quotes_tool,
+    scan_pairs_arbitrage_tool,
+    get_institutional_flow_tool,
+    optimize_portfolio_weights_tool,
 ]
+
+
 

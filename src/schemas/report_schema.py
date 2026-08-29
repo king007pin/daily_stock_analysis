@@ -87,6 +87,7 @@ class Intelligence(BaseModel):
     positive_catalysts: Optional[List[str]] = None
     earnings_outlook: Optional[str] = None
     sentiment_summary: Optional[str] = None
+    news_sentiment_score: Optional[int] = Field(None, ge=0, le=100)
 
 
 class SniperPoints(BaseModel):

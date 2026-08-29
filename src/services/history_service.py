@@ -982,7 +982,11 @@ class HistoryService:
             ])
             # 舆情情绪总结
             if intel.get('sentiment_summary'):
-                report_lines.append(f"**💭 {labels['sentiment_summary_label']}**: {intel['sentiment_summary']}")
+                score = intel.get('news_sentiment_score')
+                score_suffix = f" ({score}/100)" if score is not None else ""
+                report_lines.append(
+                    f"**💭 {labels['sentiment_summary_label']}**{score_suffix}: {intel['sentiment_summary']}"
+                )
             # 业绩预期
             if intel.get('earnings_outlook'):
                 report_lines.append(f"**📊 {labels['earnings_outlook_label']}**: {intel['earnings_outlook']}")

@@ -1331,7 +1331,11 @@ class NotificationService(
                     ])
                     # 舆情情绪总结
                     if intel.get('sentiment_summary'):
-                        report_lines.append(f"**💭 {labels['sentiment_summary_label']}**: {intel['sentiment_summary']}")
+                        score = intel.get('news_sentiment_score')
+                        score_suffix = f" ({score}/100)" if score is not None else ""
+                        report_lines.append(
+                            f"**💭 {labels['sentiment_summary_label']}**{score_suffix}: {intel['sentiment_summary']}"
+                        )
                     # 业绩预期
                     if intel.get('earnings_outlook'):
                         report_lines.append(f"**📊 {labels['earnings_outlook_label']}**: {intel['earnings_outlook']}")
@@ -1666,7 +1670,9 @@ class NotificationService(
                     info_lines.append(f"📊 {labels['earnings_outlook_label']}: {outlook}")
                 if intel.get('sentiment_summary'):
                     sentiment = str(intel['sentiment_summary'])[:50]
-                    info_lines.append(f"💭 {labels['sentiment_summary_label']}: {sentiment}")
+                    score = intel.get('news_sentiment_score')
+                    score_suffix = f" ({score}/100)" if score is not None else ""
+                    info_lines.append(f"💭 {labels['sentiment_summary_label']}{score_suffix}: {sentiment}")
                 if info_lines:
                     lines.extend(info_lines)
                     lines.append("")
@@ -1963,7 +1969,11 @@ class NotificationService(
                     lines.append(f"### 📰 {labels['info_heading']}")
                     lines.append("")
                     info_added = True
-                lines.append(f"💭 **{labels['sentiment_summary_label']}**: {str(intel['sentiment_summary'])[:80]}")
+                score = intel.get('news_sentiment_score')
+                score_suffix = f" ({score}/100)" if score is not None else ""
+                lines.append(
+                    f"💭 **{labels['sentiment_summary_label']}**{score_suffix}: {str(intel['sentiment_summary'])[:80]}"
+                )
 
             # 风险警报
             risks = intel.get('risk_alerts', [])

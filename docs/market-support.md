@@ -148,8 +148,11 @@ Portfolio 允许 JP/KR 账户、交易和持仓快照进入现有链路，但会
 
 约束与边界：
 
-- 印度股票日线和行情通过 `YfinanceFetcher` 获取。
+- 印度股票日线和行情优先通过 `YfinanceFetcher` 获取；NSE（`.NS`）代码在 `YfinanceFetcher` 失败时自动降级到 `JugaadDataFetcher`（Priority 6，无需凭据，数据来自 NSE bhavcopy，通常滞后 1-2 个交易日，仅作日线兜底，非实时行情源）。BSE（`.BO`）代码暂无此兜底，仅 `YfinanceFetcher` 覆盖。
 - 交易日历注册 `in: XBOM / Asia/Kolkata`，基础货币显示为 INR（`₹`）。
 - 大盘复盘指数支持 Nifty 50（`^NSEI`）与 BSE Sensex（`^BSESN`）。
 - 报告 Prompt 与新闻检索已扩展对印度市场的支持与货币标注。
+- Decision Signal / Portfolio / Intelligence 写入路径现已将 `in` 纳入 `VALID_MARKETS`（此前仅 `cn/hk/us/jp/kr/tw`），个股分析报告可正常生成决策信号并进入回测/校准评估；`PARTIAL_VALUATION_MARKETS` 同步纳入 `in`（与 jp/kr/tw 一致，反映当前无专属基本面/板块数据源的真实覆盖情况），组合默认币种为 INR。
+- `horizon="intraday"` 的信号现已可评估（此前 `SUPPORTED_OUTCOME_HORIZONS` 未含 `intraday`，一律返回 `unsupported_horizon`）：入场价取信号锚定日的开盘价，评估窗口为锚定日当天自身的 K 线（而非 `get_forward_bars` 排除锚定日后的未来 K 线）。这是基于现有日线数据的同日近似，非真实分时行情——同一根日线内止损/止盈的先后顺序仍无法区分，引擎按既有约定假设止损优先触发。
+- 印度实时行情新增盘口深度：`JugaadDataFetcher`（`jugaad_data.nse.NSELive.stock_quote()`）现已接入实时行情兜底链，在 `YfinanceFetcher` 成功时补充买一/卖一价量（`bid_price`/`bid_qty`/`ask_price`/`ask_qty`，`UnifiedRealtimeQuote` 新增字段），`YfinanceFetcher` 失败时作为唯一数据源兜底——此前印股实时行情仅有 `YfinanceFetcher` 一个数据源、零兜底，且不含盘口深度。NSE 返回的 0 表示"该档位无挂单"，非真实价格/数量为零，已在映射时正确区分。与本仓库已有的 `src/services/live_scraper_service.py`（`scrape_live_web_quotes` agent 工具，抓取 Screener.in/Google Finance）功能不重叠：后者是 LLM agent 按需调用、返回基本面快照，前者是 `DataFetcherManager` 确定性兜底链、返回交易所盘口深度。
 

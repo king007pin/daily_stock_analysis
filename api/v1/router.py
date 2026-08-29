@@ -18,6 +18,7 @@ from api.v1.endpoints import (
     analysis,
     auth,
     backtest,
+    bot,
     decision_signals,
     health,
     history,
@@ -108,6 +109,12 @@ router.include_router(
     intelligence.router,
     prefix="/intelligence",
     tags=["Intelligence"]
+)
+
+router.include_router(
+    bot.router,
+    prefix="/bot",
+    tags=["Bot"]
 )
 
 router.include_router(

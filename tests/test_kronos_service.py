@@ -177,6 +177,39 @@ class TestKronosService(unittest.TestCase):
             self.assertIsNotNone(result["kronos_forecast"])
             self.assertEqual(result["kronos_forecast"]["stock_code"], "RELIANCE.NS")
 
+    def test_quantile_probabilistic_bands_and_non_crossing(self):
+        res = self.forecaster.forecast(self.df, "RELIANCE.NS", horizon_days=5)
+        self.assertEqual(len(res.quantile_p10), 5)
+        self.assertEqual(len(res.quantile_p50), 5)
+        self.assertEqual(len(res.quantile_p90), 5)
+        # Strict Monotonic Non-crossing constraint: P10 <= P50 <= P90
+        for p10, p50, p90 in zip(res.quantile_p10, res.quantile_p50, res.quantile_p90):
+            self.assertLessEqual(p10, p50 + 1e-6)
+            self.assertLessEqual(p50, p90 + 1e-6)
+
+    def test_circuit_buffer_and_risk_flag(self):
+        # Normal stock should have healthy buffer > 1.5%
+        res_normal = self.forecaster.forecast(self.df, "RELIANCE.NS", horizon_days=5)
+        self.assertGreater(res_normal.circuit_buffer_pct, 0.0)
+
+        # Extreme high-volatility microcap
+        penny_df = _make_dummy_ohlcv(n_days=60, base_price=3.5, trend=-0.03)
+        res_penny = self.forecaster.forecast(penny_df, "IDEA.NS", horizon_days=5)
+        self.assertIsInstance(res_penny.circuit_risk_flag, bool)
+
+    def test_fractional_kelly_sizing_bounds(self):
+        res = self.forecaster.forecast(self.df, "TCS.NS", horizon_days=5)
+        self.assertGreaterEqual(res.kelly_fraction, 0.0)
+        self.assertLessEqual(res.kelly_fraction, 0.25)
+        self.assertGreaterEqual(res.recommended_position_pct, 0.0)
+        self.assertLessEqual(res.recommended_position_pct, 25.0)
+
+    def test_multi_horizon_summary(self):
+        res = self.forecaster.forecast(self.df, "AAPL", horizon_days=10)
+        self.assertIn("3d", res.multi_horizon_summary)
+        self.assertIn("5d", res.multi_horizon_summary)
+        self.assertIn("10d", res.multi_horizon_summary)
+
 
 if __name__ == "__main__":
     unittest.main()

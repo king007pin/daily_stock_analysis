@@ -41,7 +41,8 @@ class MarketCommand(BotCommand):
 
     @property
     def description(self) -> str:
-        return "大盘复盘分析"
+        is_en = getattr(self._get_config(), "report_language", "zh") == "en"
+        return "Market overview & index review" if is_en else "大盘复盘分析"
 
     @property
     def usage(self) -> str:
@@ -50,9 +51,11 @@ class MarketCommand(BotCommand):
     def execute(self, message: BotMessage, args: List[str]) -> BotResponse:
         """执行大盘复盘命令"""
         config = self._get_config()
+        is_en = getattr(config, "report_language", "zh") == "en"
         lock_token = self._try_acquire_market_review_lock(config)
         if lock_token is None:
-            return BotResponse.markdown_response("⚠️ 大盘复盘正在执行中，请稍后再试。")
+            msg = "⚠️ Market review is already running. Please try again shortly." if is_en else "⚠️ 大盘复盘正在执行中，请稍后再试。"
+            return BotResponse.markdown_response(msg)
 
         thread = threading.Thread(
             target=self._run_market_review,
@@ -67,8 +70,18 @@ class MarketCommand(BotCommand):
                 exc,
             )
             self._release_market_review_lock(lock_token)
-            return BotResponse.error_response(
-                "大盘复盘启动失败，已释放运行锁；请稍后重试"
+            err_msg = "Failed to start market review; lock released. Please retry." if is_en else "大盘复盘启动失败，已释放运行锁；请稍后重试"
+            return BotResponse.error_response(err_msg)
+
+        if is_en:
+            return BotResponse.markdown_response(
+                "✅ **Market Review Task Started**\n\n"
+                "Analyzing:\n"
+                "• Major index performances (US, India, HK, CN)\n"
+                "• Sector rotation & hotspot leaders\n"
+                "• Quantitative market sentiment\n"
+                "• Short-term outlook\n\n"
+                "Report will be delivered here automatically."
             )
 
         return BotResponse.markdown_response(

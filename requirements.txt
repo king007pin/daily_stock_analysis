@@ -16,6 +16,7 @@ tushare>=1.4.0              # Priority 2: Tushare Pro API
 pytdx>=1.72                 # Priority 2: Tongdaxin quote servers
 baostock>=0.8.0             # Priority 3: Baostock data
 yfinance>=0.2.0             # Priority 4: Yahoo Finance (Fallback)
+jugaad-data>=0.35.0         # Priority 6: NSE (.NS) daily-bar fallback, no API key required
 # Longbridge 4.x Linux wheels currently require manylinux_2_39; Docker uses bookworm/glibc 2.36.
 # Priority 5: Docker/Linux fallback SDK.
 longbridge==0.2.74; platform_system == "Linux" and python_version < "3.12"

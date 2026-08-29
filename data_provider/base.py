@@ -631,6 +631,7 @@ class DataFetcherManager:
         "PytdxFetcher": {"cn"},
         "BaostockFetcher": {"cn"},
         "YfinanceFetcher": {"cn", "hk", "us", "jp", "kr", "tw", "in"},
+        "JugaadDataFetcher": {"in"},
         "LongbridgeFetcher": {"hk", "us"},
         "FinnhubFetcher": {"us"},
         "AlphaVantageFetcher": {"us"},
@@ -1161,6 +1162,7 @@ class DataFetcherManager:
           3. BaostockFetcher (Priority 3)
           4. YfinanceFetcher (Priority 4)
           5. TencentFetcher (Priority 5) - A 股最终兜底
+          6. JugaadDataFetcher (Priority 6) - NSE (.NS) 日线兜底，无需凭据
         """
         from src.config import get_config
         from .efinance_fetcher import EfinanceFetcher
@@ -1172,6 +1174,7 @@ class DataFetcherManager:
         from .baostock_fetcher import BaostockFetcher
         from .yfinance_fetcher import YfinanceFetcher
         from .longbridge_fetcher import LongbridgeFetcher
+        from .jugaad_fetcher import JugaadDataFetcher
         config = get_config()
         # 创建所有数据源实例（优先级在各 Fetcher 的 __init__ 中确定）
         efinance = EfinanceFetcher()
@@ -1180,6 +1183,7 @@ class DataFetcherManager:
         pytdx = PytdxFetcher()      # 通达信数据源（可配 PYTDX_HOST/PYTDX_PORT）
         baostock = BaostockFetcher()
         yfinance = YfinanceFetcher()
+        jugaad = JugaadDataFetcher()  # NSE (.NS) 日线兜底，无需凭据，紧随 YfinanceFetcher 之后
         optional_fetchers: List[BaseFetcher] = []
 
         tushare_token = (getattr(config, "tushare_token", None) or "").strip()
@@ -1231,6 +1235,7 @@ class DataFetcherManager:
                 baostock,
                 yfinance,
                 tencent,
+                jugaad,
                 *optional_fetchers,
             ]
 
@@ -1787,8 +1792,30 @@ class DataFetcherManager:
         is_tw = (not is_us) and (not is_hk) and _is_tw_market(stock_code)
         is_in = (not is_us) and (not is_hk) and _is_in_market(stock_code)
 
-        if is_jp or is_kr or is_tw or is_in:
-            market_label = "日股" if is_jp else "韩股" if is_kr else "台股" if is_tw else "印股"
+        if is_in:
+            # India: Yfinance stays primary (existing, working path), but it
+            # has no order-book depth at all — JugaadDataFetcher (NSELive)
+            # supplements bid/ask price+qty when Yfinance succeeds, and is
+            # tried as the sole source if Yfinance fails. Previously this
+            # market had zero realtime-quote fallback, same single-point-of-
+            # failure pattern already fixed for daily bars in Phase 00.
+            quote = self._try_fetcher_quote(stock_code, "YfinanceFetcher")
+            fallback_from = "YfinanceFetcher" if quote is None else None
+            quote = self._supplement_quote(stock_code, quote, "JugaadDataFetcher")
+            if quote is not None:
+                source_note = "YfinanceFetcher" if fallback_from is None else "JugaadDataFetcher"
+                logger.info(f"[实时行情] 印股 {stock_code} 成功获取 (来源: {source_note})")
+                return self._enrich_realtime_quote(
+                    quote,
+                    fallback_from=fallback_from,
+                    realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
+                )
+            if log_final_failure:
+                logger.info(f"[实时行情] 印股 {stock_code} 无可用数据源")
+            return None
+
+        if is_jp or is_kr or is_tw:
+            market_label = "日股" if is_jp else "韩股" if is_kr else "台股"
             quote = self._try_fetcher_quote(stock_code, "YfinanceFetcher")
             if quote is not None:
                 logger.info(f"[实时行情] {market_label} {stock_code} 成功获取 (来源: YfinanceFetcher)")
@@ -2016,6 +2043,7 @@ class DataFetcherManager:
         'volume_ratio', 'turnover_rate',
         'pe_ratio', 'pb_ratio', 'total_mv', 'circ_mv',
         'amplitude',
+        'bid_price', 'bid_qty', 'ask_price', 'ask_qty',
     ]
 
     @classmethod

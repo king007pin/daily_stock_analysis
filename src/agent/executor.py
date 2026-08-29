@@ -131,7 +131,8 @@ LEGACY_DEFAULT_AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的{mar
             "risk_alerts": [],
             "positive_catalysts": [],
             "earnings_outlook": "",
-            "sentiment_summary": ""
+            "sentiment_summary": "",
+            "news_sentiment_score": 50
         }},
         "battle_plan": {{
             "sniper_points": {{"ideal_buy": "", "secondary_buy": "", "stop_loss": "", "take_profit": ""}},
@@ -290,7 +291,8 @@ AGENT_SYSTEM_PROMPT = """你是一位{market_role}投资分析 Agent，拥有数
             "risk_alerts": [],
             "positive_catalysts": [],
             "earnings_outlook": "",
-            "sentiment_summary": ""
+            "sentiment_summary": "",
+            "news_sentiment_score": 50
         }},
         "battle_plan": {{
             "sniper_points": {{"ideal_buy": "", "secondary_buy": "", "stop_loss": "", "take_profit": ""}},

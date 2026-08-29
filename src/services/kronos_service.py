@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 
+from src.utils.market_math import compute_circuit_buffer_pct
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +40,14 @@ class KronosForecastResult:
     projected_return_pct: float = 0.0
     volatility_band_upper: List[float] = field(default_factory=list)
     volatility_band_lower: List[float] = field(default_factory=list)
+    quantile_p10: List[float] = field(default_factory=list)
+    quantile_p50: List[float] = field(default_factory=list)
+    quantile_p90: List[float] = field(default_factory=list)
+    circuit_buffer_pct: float = 100.0
+    circuit_risk_flag: bool = False
+    kelly_fraction: float = 0.0
+    recommended_position_pct: float = 0.0
+    multi_horizon_summary: Dict[str, float] = field(default_factory=dict)
     trend_direction: str = "SIDEWAYS"  # "BULLISH", "BEARISH", "SIDEWAYS"
     confidence_score: int = 50          # 0 - 100
     engine_type: str = "statistical_quant"  # "neural_kronos", "kronos_api", "statistical_quant"
@@ -58,6 +68,14 @@ class KronosForecastResult:
             "projected_return_pct": round(self.projected_return_pct, 2),
             "volatility_band_upper": [round(p, prec) for p in self.volatility_band_upper],
             "volatility_band_lower": [round(p, prec) for p in self.volatility_band_lower],
+            "quantile_p10": [round(p, prec) for p in self.quantile_p10],
+            "quantile_p50": [round(p, prec) for p in self.quantile_p50],
+            "quantile_p90": [round(p, prec) for p in self.quantile_p90],
+            "circuit_buffer_pct": round(self.circuit_buffer_pct, 2),
+            "circuit_risk_flag": self.circuit_risk_flag,
+            "kelly_fraction": round(self.kelly_fraction, 2),
+            "recommended_position_pct": round(self.recommended_position_pct, 2),
+            "multi_horizon_summary": {k: round(v, 2) for k, v in self.multi_horizon_summary.items()},
             "trend_direction": self.trend_direction,
             "confidence_score": self.confidence_score,
             "engine_type": self.engine_type,
@@ -331,19 +349,39 @@ class KronosForecaster:
         momentum_slope = (ema_short - ema_med) / max(0.01, ema_med)
         daily_drift = np.clip(momentum_slope / 10.0, -0.015, 0.015)
 
-        # 3. Project Price Trajectory & Volatility Envelope (±1 Standard Deviation Cone)
+        # 3. Project Price Trajectory & Volatility Envelope (±1 Standard Deviation Cone & Quantiles)
         forecast_prices: List[float] = []
         upper_band: List[float] = []
         lower_band: List[float] = []
+        p10_band: List[float] = []
+        p50_band: List[float] = []
+        p90_band: List[float] = []
 
         price_cursor = current_price
         for step in range(1, horizon + 1):
             price_cursor = price_cursor * math.exp(daily_drift)
             # Volatility expands as sqrt(time)
             expansion = price_cursor * (daily_volatility * math.sqrt(step))
-            forecast_prices.append(float(price_cursor))
-            upper_band.append(float(price_cursor + expansion))
-            lower_band.append(float(max(0.0001, price_cursor - expansion)))
+            q_expansion = price_cursor * (1.28155 * daily_volatility * math.sqrt(step))  # 10th/90th percentile (z=1.28155)
+
+            p_median = float(price_cursor)
+            p_upper = float(price_cursor + expansion)
+            p_lower = float(max(0.0001, price_cursor - expansion))
+
+            p10 = float(max(0.0001, price_cursor - q_expansion))
+            p50 = p_median
+            p90 = float(price_cursor + q_expansion)
+
+            # Monotonic non-crossing constraint: P10 <= P50 <= P90
+            p10 = min(p10, p50)
+            p90 = max(p90, p50)
+
+            forecast_prices.append(p_median)
+            upper_band.append(p_upper)
+            lower_band.append(p_lower)
+            p10_band.append(p10)
+            p50_band.append(p50)
+            p90_band.append(p90)
 
         projected_return = ((forecast_prices[-1] - current_price) / current_price) * 100.0
 
@@ -357,6 +395,17 @@ class KronosForecaster:
             trend = "SIDEWAYS"
             conf = 50
 
+        # Multi-Horizon Projections (3d, 5d, 10d)
+        multi_horizon = {}
+        for h_step in (3, 5, 10):
+            step_idx = min(h_step - 1, len(forecast_prices) - 1)
+            ret = ((forecast_prices[step_idx] - current_price) / current_price) * 100.0 if forecast_prices else 0.0
+            multi_horizon[f"{h_step}d"] = round(ret, 2)
+
+        # Circuit Risk Buffer (for Indian NSE/BSE or sub-₹20 stocks)
+        circuit_buffer = compute_circuit_buffer_pct(current_price, stock_code)
+        circuit_risk = bool(circuit_buffer <= 1.5 or (current_price < 10.0 and daily_volatility > 0.04))
+
         # Calculate practical trading targets
         entry_low = round(current_price * 0.992, prec)
         entry_high = round(current_price * 1.008, prec)
@@ -367,9 +416,18 @@ class KronosForecaster:
         reward = max(0.0001, target_tp - current_price)
         rrr = round(reward / risk, 2) if risk > 0 else 1.0
 
+        # Fractional Kelly Sizing (Quarter-Kelly)
+        win_prob = conf / 100.0
+        if rrr > 0:
+            raw_kelly = (win_prob * (rrr + 1.0) - 1.0) / rrr
+            quarter_kelly = max(0.0, min(0.25, 0.25 * raw_kelly))
+        else:
+            quarter_kelly = 0.0
+        rec_pos_pct = quarter_kelly * 100.0
+
         summary = (
             f"Kronos Quant Engine projects a {trend} trajectory ({projected_return:+.2f}%) over "
-            f"next {horizon} trading sessions with target {curr}{target_tp:.{prec}f} and stop-loss at {curr}{target_sl:.{prec}f} (RRR: 1:{rrr:.1f})."
+            f"next {horizon} trading sessions with target {curr}{target_tp:.{prec}f} and stop-loss at {curr}{target_sl:.{prec}f} (RRR: 1:{rrr:.1f}, Sizing: {rec_pos_pct:.1f}%)."
         )
 
         return KronosForecastResult(
@@ -380,6 +438,14 @@ class KronosForecaster:
             projected_return_pct=projected_return,
             volatility_band_upper=upper_band,
             volatility_band_lower=lower_band,
+            quantile_p10=p10_band,
+            quantile_p50=p50_band,
+            quantile_p90=p90_band,
+            circuit_buffer_pct=circuit_buffer,
+            circuit_risk_flag=circuit_risk,
+            kelly_fraction=quarter_kelly,
+            recommended_position_pct=rec_pos_pct,
+            multi_horizon_summary=multi_horizon,
             trend_direction=trend,
             confidence_score=conf,
             engine_type="statistical_quant",

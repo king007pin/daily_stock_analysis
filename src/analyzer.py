@@ -555,6 +555,14 @@ _STRUCTURAL_RISK_PHRASE_HINTS = (
     "default",
 )
 
+# Markets where a capital-flow feed can exist at all. See
+# _capital_flow_applies_to() for why this gate is required.
+_CAPITAL_FLOW_SUPPORTED_MARKETS = frozenset({"cn"})
+
+# Distinct from the values below: those mean "the feed exists but returned
+# nothing this run"; this one means "the feed does not exist for this market".
+_CAPITAL_FLOW_NOT_APPLICABLE_STATUS = "not_applicable_market"
+
 _CAPITAL_FLOW_UNAVAILABLE_STATUS = {
     "not_supported",
     "not supported",
@@ -1045,7 +1053,22 @@ def stabilize_decision_with_structure(
         flow_bias, flow_reason = _capital_flow_bias_with_status(fundamental_context)
         if flow_bias == "unavailable":
             if isinstance(fundamental_context, dict) and "capital_flow" in fundamental_context:
-                if decision_type == "buy" or advice_decision_type == "buy":
+                if not _capital_flow_applies_to(result):
+                    # Non-CN market: capital flow can never be present, so the
+                    # buy downgrade below would fire on every single analysis
+                    # and permanently rewrite directional calls into
+                    # "hold and watch". Record why the field is blank and
+                    # leave the model's decision untouched.
+                    _set_decision_stability_unavailable(
+                        result,
+                        language,
+                        current_price=current_price,
+                        support=support,
+                        resistance=resistance,
+                        flow_status=_CAPITAL_FLOW_NOT_APPLICABLE_STATUS,
+                        applicable=False,
+                    )
+                elif decision_type == "buy" or advice_decision_type == "buy":
                     _downgrade_buy_without_capital_flow(
                         result,
                         language,
@@ -1313,8 +1336,23 @@ def _capital_flow_bias_with_status(
     return "neutral", "neutral"
 
 
+def _capital_flow_applies_to(result: "AnalysisResult") -> bool:
+    """True only where a capital-flow feed can exist for this stock's market.
+
+    Capital flow is an A-share-only capability. ``DataFetcherManager`` routes
+    every non-CN market through ``_build_offshore_fundamental_context``
+    (``data_provider/base.py``), whose docstring states it deliberately skips
+    the A-share-specific ``capital_flow`` block. For those markets the block is
+    therefore *permanently* unavailable by design, not transiently missing, so
+    its absence must never be read as a reason to withdraw a directional call.
+    """
+    return detect_market(getattr(result, "code", None)) in _CAPITAL_FLOW_SUPPORTED_MARKETS
+
+
 def _capital_flow_status_for_stability(reason: str, language: str) -> str:
     normalized = str(reason or "").strip().lower()
+    if normalized == _CAPITAL_FLOW_NOT_APPLICABLE_STATUS:
+        return "该市场不适用资金流数据" if language == "zh" else "Capital flow not applicable in this market"
     if "not_supported" in normalized or "unsupported" in normalized or "not available" in normalized:
         return "市场资金流服务暂不支持" if language == "zh" else "Capital flow source unsupported"
     if "empty_stock_flow" in normalized or "missing" in normalized:
@@ -1330,17 +1368,30 @@ def _set_decision_stability_unavailable(
     support: Optional[float],
     resistance: Optional[float],
     flow_status: str,
+    applicable: bool = True,
 ) -> None:
     dashboard = result.dashboard if isinstance(result.dashboard, dict) else {}
     result.dashboard = dashboard
+    if applicable:
+        reason = (
+            "资金流不可用，未使用资金流校准"
+            if language == "zh"
+            else "Capital flow unavailable; stability calibration not applied"
+        )
+    else:
+        reason = (
+            "该市场无资金流数据源，未使用资金流校准"
+            if language == "zh"
+            else "No capital-flow source exists for this market; stability calibration not applied"
+        )
     dashboard["decision_stability"] = {
         "applied": False,
-        "reason": "资金流不可用，未使用资金流校准" if language == "zh" else "Capital flow unavailable; stability calibration not applied",
+        "reason": reason,
         "capital_flow_status": _capital_flow_status_for_stability(flow_status, language),
         "current_price": current_price,
         "support": support,
         "resistance": resistance,
-        "capital_flow_bias": "unavailable",
+        "capital_flow_bias": "unavailable" if applicable else "not_applicable",
     }
     _sync_stability_dashboard_fields(result)
 
@@ -1952,7 +2003,8 @@ class GeminiAnalyzer:
             "risk_alerts": ["风险点1：具体描述", "风险点2：具体描述"],
             "positive_catalysts": ["利好1：具体描述", "利好2：具体描述"],
             "earnings_outlook": "业绩预期分析（基于年报预告、业绩快报等）",
-            "sentiment_summary": "舆情情绪一句话总结"
+            "sentiment_summary": "舆情情绪一句话总结",
+            "news_sentiment_score": 数值(0-100，50为中性，越高越看多，越低越看空，基于新闻与舆情本身的情绪极性，与整体评分区分开)
         },
 
         "battle_plan": {
@@ -2140,7 +2192,8 @@ class GeminiAnalyzer:
             "risk_alerts": ["风险点1：具体描述", "风险点2：具体描述"],
             "positive_catalysts": ["利好1：具体描述", "利好2：具体描述"],
             "earnings_outlook": "业绩预期分析（基于年报预告、业绩快报等）",
-            "sentiment_summary": "舆情情绪一句话总结"
+            "sentiment_summary": "舆情情绪一句话总结",
+            "news_sentiment_score": 数值(0-100，50为中性，越高越看多，越低越看空，基于新闻与舆情本身的情绪极性，与整体评分区分开)
         },
 
         "battle_plan": {

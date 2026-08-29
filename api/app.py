@@ -289,9 +289,24 @@ async def app_lifespan(app: FastAPI):
         runtime_scheduler=app.state.runtime_scheduler_service,
     )
     _schedule_stock_index_background_refresh(app, "startup")
+
+    # 启动 Telegram Polling 客户端（若启用）
+    from src.config import get_config
+    if getattr(get_config(), "telegram_polling_enabled", False):
+        try:
+            from bot.platforms import start_telegram_polling_background
+            start_telegram_polling_background()
+        except Exception as exc:
+            logger.warning("[TelegramPolling] FastAPI 启动时启动 Telegram Polling 失败: %s", exc)
+
     try:
         yield
     finally:
+        try:
+            from bot.platforms import stop_telegram_polling
+            stop_telegram_polling()
+        except Exception:
+            pass
         refresh_task = getattr(app.state, "stock_index_refresh_task", None)
         if refresh_task is not None and not refresh_task.done():
             refresh_task.cancel()

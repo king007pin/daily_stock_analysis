@@ -440,6 +440,13 @@ def parse_arguments() -> argparse.Namespace:
         help='强制回测（即使已有回测结果也重新计算）'
     )
 
+    # === Telegram 机器人交互服务 ===
+    parser.add_argument(
+        '--telegram-bot',
+        action='store_true',
+        help='独立启动 Telegram 机器人双向 Long-Polling 交互服务'
+    )
+
     return parser.parse_args()
 
 
@@ -716,6 +723,38 @@ def _run_auto_backtest(config: Config) -> None:
         logger.warning(f"自动回测失败（已忽略）: {exc}")
 
 
+def _run_decision_signal_outcomes(config: Config) -> None:
+    """Score matured decision signals, without failing analysis.
+
+    ``DecisionSignalOutcomeService.run_outcomes`` previously had no production
+    caller at all: signals accumulated and nothing ever evaluated them, so the
+    outcome table only ever contained rows from ad-hoc manual invocations and
+    no calibration data could accrue. This is the scheduled entry point.
+
+    Deliberately separate from ``_run_auto_backtest``: that evaluates analysis
+    reports via ``BacktestService``; this evaluates structured decision
+    signals, a different table with a different maturity model. Both are
+    fail-soft — a scoring problem must never take down the analysis run.
+    """
+
+    try:
+        if not getattr(config, 'backtest_enabled', False):
+            return
+
+        from src.services.decision_signal_outcome_service import DecisionSignalOutcomeService
+
+        logger.info("开始决策信号结果评估...")
+        service = DecisionSignalOutcomeService()
+        stats = service.run_outcomes(limit=200)
+        logger.info(
+            f"决策信号结果评估完成: evaluated={stats.get('evaluated')} "
+            f"created={stats.get('created')} updated={stats.get('updated')} "
+            f"skipped={stats.get('skipped')}"
+        )
+    except Exception as exc:
+        logger.warning(f"决策信号结果评估失败（已忽略）: {exc}")
+
+
 def run_full_analysis(
     config: Config,
     args: argparse.Namespace,
@@ -744,6 +783,7 @@ def run_full_analysis(
             "本轮跳过个股分析和大盘复盘。"
         )
         _run_auto_backtest(config)
+        _run_decision_signal_outcomes(config)
         return True
 
     # Import pipeline modules outside the broad try/except so that import-time
@@ -756,6 +796,7 @@ def run_full_analysis(
 
     def _return_with_auto_backtest(result: bool) -> bool:
         _run_auto_backtest(config)
+        _run_decision_signal_outcomes(config)
         return result
 
     try:
@@ -1312,6 +1353,17 @@ def start_bot_stream_clients(config: Config) -> None:
         except Exception as exc:
             logger.error(f"[Main] Failed to start Feishu Stream client: {exc}")
 
+    # 启动 Telegram Polling 客户端
+    if getattr(config, 'telegram_polling_enabled', False):
+        try:
+            from bot.platforms import start_telegram_polling_background
+            if start_telegram_polling_background():
+                logger.info("[Main] Telegram Polling client started in background.")
+            else:
+                logger.warning("[Main] Telegram Polling client failed to start (check TELEGRAM_BOT_TOKEN).")
+        except Exception as exc:
+            logger.error(f"[Main] Failed to start Telegram Polling client: {exc}")
+
 
 def _resolve_scheduled_stock_codes(stock_codes: Optional[List[str]]) -> Optional[List[str]]:
     """Scheduled runs should always read the latest persisted watchlist."""
@@ -1542,6 +1594,23 @@ def main() -> int:
                 time.sleep(1)
         except KeyboardInterrupt:
             logger.info("\n用户中断，程序退出")
+        return 0
+
+    # === 独立 Telegram 机器人模式 ===
+    if getattr(args, 'telegram_bot', False):
+        logger.info("模式: 独立 Telegram 机器人交互服务")
+        from bot.platforms import start_telegram_polling_background
+        if not start_telegram_polling_background():
+            logger.error("启动 Telegram 机器人失败：请检查 TELEGRAM_BOT_TOKEN 配置")
+            return 1
+        logger.info("Telegram 机器人长轮询已启动，按 Ctrl+C 退出...")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("\n用户中断，正在停止 Telegram 机器人...")
+            from bot.platforms import stop_telegram_polling
+            stop_telegram_polling()
         return 0
 
     try:

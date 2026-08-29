@@ -278,6 +278,73 @@ def parse_env_int(
     return parsed
 
 
+def parse_optional_env_float(value: Optional[str]) -> Optional[float]:
+    """Parse an optional float env value, returning None when unset.
+
+    Distinct from parse_env_float: there is no default to fall back to. A blank
+    or absent value means "not configured", which downstream code must treat as
+    an error rather than as zero — the difference between an unsourced tax rate
+    and a rate of zero is the difference between a refusal and a silent lie.
+    A present-but-unparseable value raises, so a typo cannot become None.
+    """
+    if value is None or not str(value).strip():
+        return None
+    return float(str(value).strip())
+
+
+def parse_optional_env_int(value: Optional[str]) -> Optional[int]:
+    """Parse an optional int env value, returning None when unset."""
+    if value is None or not str(value).strip():
+        return None
+    return int(str(value).strip())
+
+
+def parse_neutral_band_by_horizon(value: Optional[str]) -> Dict[str, float]:
+    """Parse ``"intraday:0.6,1d:1.0"`` into ``{"intraday": 0.6, "1d": 1.0}``.
+
+    Unset or blank yields an empty mapping, which callers must read as "use the
+    flat ``backtest_neutral_band_pct`` for every horizon" — so not configuring
+    this changes nothing. Malformed pairs are warned about and skipped rather
+    than raising: a typo in one horizon must not take down analysis, and a
+    silently wrong band is worse than an ignored one.
+    """
+    result: Dict[str, float] = {}
+    if value is None or not str(value).strip():
+        return result
+
+    for chunk in str(value).split(","):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        horizon, separator, raw_band = entry.partition(":")
+        horizon = horizon.strip()
+        if not separator or not horizon:
+            logger.warning(
+                "BACKTEST_NEUTRAL_BAND_PCT_BY_HORIZON entry %r is not 'horizon:value'; ignoring it",
+                entry,
+            )
+            continue
+        try:
+            band = float(raw_band.strip())
+        except (TypeError, ValueError):
+            logger.warning(
+                "BACKTEST_NEUTRAL_BAND_PCT_BY_HORIZON band for %r is not a number (%r); ignoring it",
+                horizon,
+                raw_band,
+            )
+            continue
+        if band < 0:
+            logger.warning(
+                "BACKTEST_NEUTRAL_BAND_PCT_BY_HORIZON band for %r is negative (%s); ignoring it",
+                horizon,
+                band,
+            )
+            continue
+        result[horizon] = band
+
+    return result
+
+
 def parse_env_float(
     value: Optional[str],
     default: float,
@@ -1174,7 +1241,55 @@ class Config:
     backtest_min_age_days: int = 14
     backtest_engine_version: str = "v1"
     backtest_neutral_band_pct: float = 2.0
-    
+    # Per-horizon override for the neutral band, e.g. "intraday:0.6,1d:1.0".
+    # Empty by default: every horizon then uses backtest_neutral_band_pct, so
+    # leaving this unset preserves existing behaviour exactly. A flat band is
+    # wrong across horizons — an intraday signal is scored over one session's
+    # open-to-close move, where a 2% band leaves roughly three quarters of
+    # evaluations "neutral" and starves the win-rate denominator.
+    backtest_neutral_band_pct_by_horizon: Dict[str, float] = field(default_factory=dict)
+    # When stop-loss and take-profit are both touched inside one daily bar, the
+    # ordering is unknowable from OHLC. False keeps the conservative
+    # stop-loss-first assumption; True assumes the bar reached the extreme
+    # nearest its open first. Changing it changes stored outcomes — bump
+    # backtest_engine_version alongside it.
+    backtest_bar_adaptive_high_low_ordering: bool = False
+
+    # Refill missing daily bars on demand during decision-signal outcome
+    # evaluation. Off by default because it performs a network fetch; enable it
+    # in the scheduled environment, where a stale stock_daily is exactly what
+    # stops already-recorded signals from ever maturing.
+    decision_outcome_daily_refill_enabled: bool = False
+
+    # === Transaction costs (Stage 07) ===
+    # Every rate is a FRACTION of turnover, not a percentage: 0.1% is 0.001.
+    # All default to None on purpose. src/services/transaction_cost_service.py
+    # raises rather than computing with an unset rate, because a remembered tax
+    # rate is a fabricated tax rate (AGENTS.md 1.3). Source each from the
+    # authority named in that module's RATE_SOURCES before enabling costs.
+    txn_cost_brokerage_rate: Optional[float] = None
+    txn_cost_brokerage_cap_inr: Optional[float] = None
+    txn_cost_stt_mis_buy_rate: Optional[float] = None
+    txn_cost_stt_mis_sell_rate: Optional[float] = None
+    txn_cost_stt_cnc_buy_rate: Optional[float] = None
+    txn_cost_stt_cnc_sell_rate: Optional[float] = None
+    txn_cost_exchange_txn_rate: Optional[float] = None
+    txn_cost_sebi_turnover_rate: Optional[float] = None
+    txn_cost_stamp_duty_buy_rate: Optional[float] = None
+    txn_cost_gst_rate: Optional[float] = None
+
+    # === Portfolio risk limits (Stage 09) ===
+    # All None means every limit is disabled, so introducing this changes
+    # nothing until it is configured. Percentages here ARE percentages (2.0 = 2%).
+    risk_limit_max_drawdown_pct: Optional[float] = None
+    risk_limit_max_risk_per_trade_pct: Optional[float] = None
+    risk_limit_max_daily_loss_pct: Optional[float] = None
+    risk_limit_max_gross_exposure_pct: Optional[float] = None
+    risk_limit_max_positions: Optional[int] = None
+    risk_limit_max_positions_per_sector: Optional[int] = None
+    risk_limit_max_correlated_positions: Optional[int] = None
+    risk_limit_correlation_threshold: Optional[float] = None
+
     # === 日志配置 ===
     log_dir: str = "./logs"  # 日志文件目录
     log_level: str = "INFO"  # 日志级别
@@ -1296,6 +1411,9 @@ class Config:
     
     # Telegram 机器人 - 已有 telegram_bot_token, telegram_chat_id
     telegram_webhook_secret: Optional[str] = None   # Webhook 密钥
+    telegram_polling_enabled: bool = False          # 是否启用 Long-Polling 长轮询模式（无需公网IP）
+    telegram_allowed_users: Optional[str] = None    # 允许交互的 Telegram 用户白名单 (ID 或 username，逗号分隔)
+    telegram_bot_name: Optional[str] = None         # Telegram 机器人用户名 (用于群聊 @mention 识别)
 
     # === 配置校验模式 ===
     # CONFIG_VALIDATE_MODE=warn (default): log all issues but always continue startup
@@ -2138,6 +2256,33 @@ class Config:
                 field_name='BACKTEST_NEUTRAL_BAND_PCT',
                 minimum=0.0,
             ),
+            backtest_neutral_band_pct_by_horizon=parse_neutral_band_by_horizon(
+                os.getenv('BACKTEST_NEUTRAL_BAND_PCT_BY_HORIZON'),
+            ),
+            backtest_bar_adaptive_high_low_ordering=parse_env_bool(
+                os.getenv('BACKTEST_BAR_ADAPTIVE_HIGH_LOW_ORDERING'), False
+            ),
+            decision_outcome_daily_refill_enabled=parse_env_bool(
+                os.getenv('DECISION_OUTCOME_DAILY_REFILL_ENABLED'), False
+            ),
+            txn_cost_brokerage_rate=parse_optional_env_float(os.getenv('TXN_COST_BROKERAGE_RATE')),
+            txn_cost_brokerage_cap_inr=parse_optional_env_float(os.getenv('TXN_COST_BROKERAGE_CAP_INR')),
+            txn_cost_stt_mis_buy_rate=parse_optional_env_float(os.getenv('TXN_COST_STT_MIS_BUY_RATE')),
+            txn_cost_stt_mis_sell_rate=parse_optional_env_float(os.getenv('TXN_COST_STT_MIS_SELL_RATE')),
+            txn_cost_stt_cnc_buy_rate=parse_optional_env_float(os.getenv('TXN_COST_STT_CNC_BUY_RATE')),
+            txn_cost_stt_cnc_sell_rate=parse_optional_env_float(os.getenv('TXN_COST_STT_CNC_SELL_RATE')),
+            txn_cost_exchange_txn_rate=parse_optional_env_float(os.getenv('TXN_COST_EXCHANGE_TXN_RATE')),
+            txn_cost_sebi_turnover_rate=parse_optional_env_float(os.getenv('TXN_COST_SEBI_TURNOVER_RATE')),
+            txn_cost_stamp_duty_buy_rate=parse_optional_env_float(os.getenv('TXN_COST_STAMP_DUTY_BUY_RATE')),
+            txn_cost_gst_rate=parse_optional_env_float(os.getenv('TXN_COST_GST_RATE')),
+            risk_limit_max_drawdown_pct=parse_optional_env_float(os.getenv('RISK_LIMIT_MAX_DRAWDOWN_PCT')),
+            risk_limit_max_risk_per_trade_pct=parse_optional_env_float(os.getenv('RISK_LIMIT_MAX_RISK_PER_TRADE_PCT')),
+            risk_limit_max_daily_loss_pct=parse_optional_env_float(os.getenv('RISK_LIMIT_MAX_DAILY_LOSS_PCT')),
+            risk_limit_max_gross_exposure_pct=parse_optional_env_float(os.getenv('RISK_LIMIT_MAX_GROSS_EXPOSURE_PCT')),
+            risk_limit_correlation_threshold=parse_optional_env_float(os.getenv('RISK_LIMIT_CORRELATION_THRESHOLD')),
+            risk_limit_max_positions=parse_optional_env_int(os.getenv('RISK_LIMIT_MAX_POSITIONS')),
+            risk_limit_max_positions_per_sector=parse_optional_env_int(os.getenv('RISK_LIMIT_MAX_POSITIONS_PER_SECTOR')),
+            risk_limit_max_correlated_positions=parse_optional_env_int(os.getenv('RISK_LIMIT_MAX_CORRELATED_POSITIONS')),
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             max_workers=parse_env_int(os.getenv('MAX_WORKERS'), 3, field_name='MAX_WORKERS', minimum=1),
@@ -2190,6 +2335,9 @@ class Config:
             wecom_agent_id=os.getenv('WECOM_AGENT_ID'),
             # Telegram
             telegram_webhook_secret=os.getenv('TELEGRAM_WEBHOOK_SECRET'),
+            telegram_polling_enabled=os.getenv('TELEGRAM_POLLING_ENABLED', 'false').lower() == 'true',
+            telegram_allowed_users=os.getenv('TELEGRAM_ALLOWED_USERS'),
+            telegram_bot_name=os.getenv('TELEGRAM_BOT_NAME'),
             # Discord 机器人扩展配置
             discord_bot_status=os.getenv('DISCORD_BOT_STATUS', 'A股智能分析 | /help'),
             # 实时行情增强数据配置

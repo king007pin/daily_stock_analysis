@@ -13,9 +13,10 @@ def _result(
     score: int,
     current_price: float,
     change_pct: float = 0.0,
+    code: str = "002812",
 ) -> AnalysisResult:
     return AnalysisResult(
-        code="002812",
+        code=code,
         name="恩捷股份",
         sentiment_score=score,
         trend_prediction="看多" if decision_type == "buy" else "看空",
@@ -340,3 +341,73 @@ def test_refines_hold_pullback_near_support_as_shakeout_watch() -> None:
     assert result.decision_type == "hold"
     assert result.operation_advice == "洗盘观察"
     assert "更适合按洗盘观察处理" in result.risk_warning
+
+
+# ---------------------------------------------------------------------------
+# Capital flow is an A-share-only feed. For every other market it is
+# permanently absent by design (data_provider/base.py routes non-CN markets
+# through _build_offshore_fundamental_context, which skips the block). The
+# buy downgrade must therefore not fire outside CN, or every non-CN
+# directional call is rewritten to "hold and watch" before it is ever stored.
+# ---------------------------------------------------------------------------
+
+
+def test_keeps_buy_for_indian_stock_when_capital_flow_is_not_applicable() -> None:
+    result = _result(
+        decision_type="buy",
+        operation_advice="Buy",
+        score=80,
+        current_price=14.0,
+        code="IDEA.NS",
+    )
+
+    stabilize_decision_with_structure(
+        result,
+        SimpleNamespace(support_levels=[13.0], resistance_levels=[15.0]),
+        _unsupported_fund_flow(),
+    )
+
+    assert result.decision_type == "buy"
+    assert result.sentiment_score == 80
+    stability = result.dashboard["decision_stability"]
+    assert stability["applied"] is False
+    assert stability["capital_flow_bias"] == "not_applicable"
+
+
+def test_keeps_buy_for_us_stock_when_capital_flow_is_not_applicable() -> None:
+    result = _result(
+        decision_type="buy",
+        operation_advice="Buy",
+        score=72,
+        current_price=210.0,
+        code="AAPL",
+    )
+
+    stabilize_decision_with_structure(
+        result,
+        SimpleNamespace(support_levels=[200.0], resistance_levels=[220.0]),
+        _unsupported_fund_flow(),
+    )
+
+    assert result.decision_type == "buy"
+    assert result.dashboard["decision_stability"]["capital_flow_bias"] == "not_applicable"
+
+
+def test_cn_buy_is_still_downgraded_when_capital_flow_is_unavailable() -> None:
+    """Regression guard: the CN path must be unchanged by the market gate."""
+    result = _result(
+        decision_type="buy",
+        operation_advice="买入",
+        score=80,
+        current_price=32.0,
+        code="002812",
+    )
+
+    stabilize_decision_with_structure(
+        result,
+        SimpleNamespace(support_levels=[30.0], resistance_levels=[34.0]),
+        _unsupported_fund_flow(),
+    )
+
+    assert result.decision_type == "hold"
+    assert result.dashboard["decision_stability"]["capital_flow_bias"] == "unavailable"
