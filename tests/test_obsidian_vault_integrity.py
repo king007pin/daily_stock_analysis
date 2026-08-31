@@ -23,9 +23,37 @@ import sys
 from pathlib import Path
 import pytest
 
-VAULT_ROOT = "/Users/shubhammac/SSD/Obsidian/Daily Stock Analysis/Daily Stock Analysis"
+# 这些路径指向开发者本机的 Obsidian vault 与运行时数据库，CI runner 上不存在。
+# 硬编码绝对路径会让整个文件在 CI 上必然失败（2026-08-31 首次 CI 运行：55 failed），
+# 同时在本机始终通过 —— 与 .env 泄漏正好相反的同一类缺陷：测试绑定了某一台机器。
+# 允许用环境变量覆盖，并在目标不存在时跳过而不是失败。
+VAULT_ROOT = os.environ.get(
+    "DSA_VAULT_ROOT",
+    "/Users/shubhammac/SSD/Obsidian/Daily Stock Analysis/Daily Stock Analysis",
+)
 SCRIPTS_BRIDGE_DIR = os.path.join(VAULT_ROOT, "06-Scripts-Bridge")
-DB_PATH = "/Users/shubhammac/daily_stock_analysis/data/stock_analysis.db"
+DB_PATH = os.environ.get(
+    "DSA_DB_PATH",
+    os.path.join(Path(__file__).resolve().parents[1], "data", "stock_analysis.db"),
+)
+
+# 本文件是针对本机产物的集成检查：vault 不在时整体跳过。
+pytestmark = pytest.mark.skipif(
+    not os.path.isdir(VAULT_ROOT),
+    reason=(
+        "Obsidian vault not present - local integration check. "
+        "Set DSA_VAULT_ROOT to run it elsewhere."
+    ),
+)
+
+# 数据库用例另有依赖：vault 存在但库文件缺失时，只跳过这些用例。
+requires_local_db = pytest.mark.skipif(
+    not os.path.isfile(DB_PATH),
+    reason=(
+        "stock_analysis.db not present - local integration check. "
+        "Set DSA_DB_PATH to run it elsewhere."
+    ),
+)
 
 EXPECTED_MODULE_DIRS = [
     "00-Dashboard",
@@ -235,6 +263,7 @@ class TestBridgeScripts:
         assert "SUBEXLTD.NS" in proc.stdout
 
 
+@requires_local_db
 class TestDatabaseIntegrityAndPersistence:
     """Validates SQLite database integrity and decision signal persistence."""
 
