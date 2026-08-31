@@ -584,6 +584,9 @@ forecast_kronos_tool = ToolDefinition(
 
 def _handle_recall_trade_memory(stock_code: str, setup_type: str = "BREAKOUT", top_k: int = 3) -> dict:
     """Query ChromaDB Vector RAG Memory for historical setup analogues and empirical win rates."""
+    import numpy as np
+    import pandas as pd
+
     from src.services.memory_service import TradeMemoryService, TradePatternRecord
 
     if not (stock_code and str(stock_code).strip()):
@@ -766,6 +769,8 @@ def _handle_optimize_portfolio_weights(symbols: str, method: str = "MAX_SHARPE")
     """Compute optimal portfolio weights using Markowitz tangency or Minimum Variance."""
     if not (symbols and str(symbols).strip()):
         return {"error": "symbols is required"}
+
+    import pandas as pd
 
     from src.services.history_loader import load_history_df
     from src.services.portfolio_optimizer_service import PortfolioOptimizerService
