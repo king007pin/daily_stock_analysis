@@ -3,6 +3,12 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  # main 是受保护的主线，但此前 CI 只在 pull_request 上触发，
+  # 直接 push 到 main 会完全绕过 backend-gate。2026-08-31 核查：
+  # 本仓库历史上 workflow 运行次数为 0，九个真实失败因此从未被拦下。
+  # 补上 push 触发，使直推 main 也必须通过同一道门。
+  push:
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
