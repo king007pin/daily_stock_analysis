@@ -33,6 +33,12 @@ from src.schemas.decision_profile import (
 )
 from src.schemas.decision_scale import action_for_score, score_action_conflicts_without_guardrail
 from src.services.decision_signal_level_validator import validate_levels
+from src.services.decision_signal_level_validator import MIN_REWARD_RISK
+from src.services.horizon_policy import (
+    minimum_viable_horizon,
+    noise_safe_stop_pct,
+    reachable_target_pct,
+)
 from src.services.portfolio_service import VALID_MARKETS
 from src.storage import (
     AnalysisHistory,
@@ -55,6 +61,8 @@ REDACTION_MARKERS = ("[REDACTED]", "[REDACTED_URL]")
 TERMINAL_STATUSES = frozenset({"expired", "invalidated", "closed", "archived"})
 BULLISH_ACTIONS = frozenset({"buy", "add"})
 DEFENSIVE_ACTIONS = frozenset({"reduce", "sell", "avoid"})
+HORIZON_ORDER = {"intraday": 1, "1d": 1, "3d": 3, "5d": 5, "10d": 10}
+
 INTRADAY_PHASES = frozenset({
     MarketPhase.PREMARKET.value,
     MarketPhase.INTRADAY.value,
@@ -869,6 +877,12 @@ class DecisionSignalService:
         if fields["status"] == "active" and self._is_expired(fields["expires_at"]):
             fields["status"] = "expired"
         self._validate_entry_range(fields)
+        # horizon 与目标价必须先按标的波动校正，plan_quality 才是对"校正后的
+        # 计划"的判断，而不是对一份不可执行的原始计划的判断。
+        policy_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        self._apply_horizon_policy(fields, policy_metadata)
+        if policy_metadata:
+            fields["metadata_json"] = self._json_dumps(policy_metadata)
         fields["plan_quality"] = self._normalize_plan_quality(
             payload.get("plan_quality"),
             fields=fields,
@@ -884,6 +898,151 @@ class DecisionSignalService:
         if action == "alert" or market_phase in INTRADAY_PHASES:
             return "intraday"
         return "3d"
+
+    def _instrument_stats(self, stock_code: Any) -> tuple[Optional[float], Optional[float]]:
+        """Recent average daily range % and average close for a code."""
+        code = str(stock_code or "").strip()
+        if not code:
+            return None, None
+        cache = getattr(self, "_instrument_stats_cache", None)
+        if cache is None:
+            cache = self._instrument_stats_cache = {}
+        if code in cache:
+            return cache[code]
+        adr = price = None
+        try:
+            from src.storage import StockDaily
+
+            with self.db.get_session() as session:
+                rows = (
+                    session.query(
+                        StockDaily.high, StockDaily.low, StockDaily.open, StockDaily.close
+                    )
+                    .filter(StockDaily.code == code)
+                    .order_by(StockDaily.date.desc())
+                    .limit(60)
+                    .all()
+                )
+            ranges = [
+                (float(h) - float(low)) / float(o) * 100
+                for h, low, o, _ in rows
+                if o and float(o) > 0 and h is not None and low is not None
+            ]
+            closes = [float(c) for *_, c in rows if c]
+            if ranges:
+                adr = sum(ranges) / len(ranges)
+            if closes:
+                price = sum(closes) / len(closes)
+        except Exception:
+            logger.debug("[DecisionSignal] instrument stats lookup failed for %s", code, exc_info=True)
+        cache[code] = (adr, price)
+        return adr, price
+
+    def _apply_horizon_policy(self, fields: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+        """Set a viable horizon and keep the target inside what it can deliver.
+
+        方向性信号的 horizon 此前只看 market_phase：盘中阶段一律 intraday，
+        与标的本身的波动无关。目标价则直接来自 LLM 输出（sniper points），
+        既不参考波动也不参考 horizon —— 于是出现了"日内 +11.32%"这类目标，
+        实测超出可达幅度 14.7 倍。这样的信号永远不会触及止损或目标，也就
+        永远无法作为交易被记分。
+
+        这里做两件事，都不静默丢信息：
+          1. 按标的实测波动把 horizon 提升到最短可行值；
+          2. 把超出可达范围的目标夹到可达值，并把原值记入 metadata。
+        原始 LLM 目标全部保留，日后可以回头衡量模型的目标是否强于公式。
+        """
+        action = str(fields.get("action") or "").strip().lower()
+        if action in ("watch", "alert"):
+            return
+
+        adr, price = self._instrument_stats(fields.get("stock_code"))
+        if not adr or not price:
+            return
+
+        viable = minimum_viable_horizon(adr, price)
+        original_horizon = fields.get("horizon")
+        if viable is None:
+            metadata.setdefault("horizon_policy", {})["out_of_universe"] = True
+            metadata["horizon_policy"]["reason"] = (
+                "no horizon up to 10d supports the required net reward-to-risk"
+            )
+            return
+
+        if HORIZON_ORDER.get(original_horizon, 0) < HORIZON_ORDER.get(viable, 0):
+            fields["horizon"] = viable
+            metadata.setdefault("horizon_policy", {})["original_horizon"] = original_horizon
+            metadata["horizon_policy"]["horizon"] = viable
+            logger.info(
+                "[DecisionSignal] %s horizon %s -> %s (ADR %.2f%%)",
+                fields.get("stock_code"), original_horizon, viable, adr,
+            )
+
+        entry_low = fields.get("entry_low")
+        entry_high = fields.get("entry_high")
+        entry = None
+        if entry_low is not None and entry_high is not None:
+            entry = (float(entry_low) + float(entry_high)) / 2
+        elif entry_low is not None:
+            entry = float(entry_low)
+        target = fields.get("target_price")
+        if entry is None or not target or entry <= 0:
+            return
+
+        cap_pct = reachable_target_pct(adr, fields.get("horizon"))
+        if cap_pct is None:
+            return
+
+        distance_pct = abs(float(target) - entry) / entry * 100
+        if distance_pct <= cap_pct:
+            return
+
+        bullish = action in ("buy", "add")
+        capped = entry * (1 + cap_pct / 100) if bullish else entry * (1 - cap_pct / 100)
+        policy = metadata.setdefault("horizon_policy", {})
+        policy["original_target_price"] = float(target)
+        policy["original_target_distance_pct"] = round(distance_pct, 4)
+        policy["target_capped_to_pct"] = round(cap_pct, 4)
+        fields["target_price"] = round(capped, 2)
+        logger.info(
+            "[DecisionSignal] %s target %.2f -> %.2f (%.2f%% exceeded reachable %.2f%% over %s)",
+            fields.get("stock_code"), float(target), fields["target_price"],
+            distance_pct, cap_pct, fields.get("horizon"),
+        )
+
+        # 只夹目标而不管止损会让计划更糟：目标被拉近之后，原本的宽止损
+        # 会把 R:R 压到门槛之下，信号照样不可执行。夹了目标就必须重新
+        # 推导止损，否则这一步没有让任何信号变得可交易。
+        stop = fields.get("stop_loss")
+        if stop is None:
+            return
+        stop_f = float(stop)
+        risk_pct = abs(entry - stop_f) / entry * 100
+        floor_pct = noise_safe_stop_pct(adr, price)
+        # 留 5% 余量：止损要按分位取整，正好卡在门槛上会被四舍五入推到门槛之下。
+        needed_risk_pct = cap_pct / (MIN_REWARD_RISK * 1.05)
+        if risk_pct <= needed_risk_pct:
+            return
+
+        # 收紧到刚好满足 R:R，但绝不紧于噪声下限 —— 比下限更紧的止损
+        # 是在收割噪声，不是风控。
+        new_risk_pct = max(needed_risk_pct, floor_pct)
+        if new_risk_pct >= risk_pct:
+            policy["stop_left_as_is"] = (
+                "noise floor prevents tightening enough to reach the required reward-to-risk"
+            )
+            return
+        new_stop = (
+            entry * (1 - new_risk_pct / 100) if bullish else entry * (1 + new_risk_pct / 100)
+        )
+        policy["original_stop_loss"] = stop_f
+        policy["original_stop_distance_pct"] = round(risk_pct, 4)
+        policy["stop_tightened_to_pct"] = round(new_risk_pct, 4)
+        fields["stop_loss"] = round(new_stop, 2)
+        logger.info(
+            "[DecisionSignal] %s stop %.2f -> %.2f to preserve reward-to-risk after target cap",
+            fields.get("stock_code"), stop_f, fields["stop_loss"],
+        )
 
     @classmethod
     def _default_expires_at(
