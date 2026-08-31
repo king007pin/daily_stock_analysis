@@ -34,6 +34,12 @@ _MAX_FEED_BYTES = 2 * 1024 * 1024
 _MAX_FEED_REDIRECTS = 5
 _UPSTREAM_FETCH_FAILURE_MESSAGE = "fetch failed: upstream request failed"
 _REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+# 只作为模板使用，禁止直接传给 requests。
+# requests 的 merge_environment_settings 会就地 setdefault 环境代理到调用方传入的
+# dict 上；而 urllib.request.getproxies() 把任何 `<scheme>_proxy` 形式的环境变量都
+# 当作代理配置，因此 .env 中的 `USE_PROXY=false` 会被解析成 scheme "use"。
+# 一旦把模块级 dict 直接传出去，该键就会被永久写入，之后进程内所有请求都会带上
+# 这个伪造的 proxy scheme。每次请求必须传副本。
 _DISABLE_REQUEST_PROXIES = {"http": None, "https": None}
 _DNS_GUARD_LOCK = threading.Lock()
 _AUTO_FETCH_MIN_INTERVAL_SECONDS = 60 * 60
@@ -568,7 +574,7 @@ class IntelligenceService:
             socket.getaddrinfo = guarded_getaddrinfo
             try:
                 request_kwargs = dict(kwargs)
-                request_kwargs.setdefault("proxies", _DISABLE_REQUEST_PROXIES)
+                request_kwargs.setdefault("proxies", dict(_DISABLE_REQUEST_PROXIES))
                 return requests.get(raw_url, **request_kwargs)
             finally:
                 socket.getaddrinfo = original_getaddrinfo
