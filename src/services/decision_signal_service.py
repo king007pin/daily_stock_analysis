@@ -32,6 +32,7 @@ from src.schemas.decision_profile import (
     normalize_decision_profile_filter,
 )
 from src.schemas.decision_scale import action_for_score, score_action_conflicts_without_guardrail
+from src.services.decision_signal_level_validator import validate_levels
 from src.services.portfolio_service import VALID_MARKETS
 from src.storage import (
     AnalysisHistory,
@@ -1056,8 +1057,21 @@ class DecisionSignalService:
         return {"metadata_replaced_due_to_non_object": True}
 
     def _normalize_plan_quality(self, value: Any, *, fields: Dict[str, Any]) -> str:
-        if value is not None:
-            return self._normalize_enum(value, PLAN_QUALITIES, "plan_quality")
+        claimed = (
+            self._normalize_enum(value, PLAN_QUALITIES, "plan_quality")
+            if value is not None
+            else self._plan_quality_from_slots(fields)
+        )
+        # 声明是声明，能否成交是另一回事。此前本方法只数"填了几个槽位"，
+        # 一条 entry/stop/target/invalidation 齐全但几何写反、或目标在自身
+        # horizon 内根本不可达的信号，同样会被标成 complete —— 该字段因此
+        # 长期在说谎（2026-08-31：42 条自称 complete，其中方向性信号 12 条里
+        # 有 9 条实际不可执行）。调用方显式传入的值同样要被校验：主张不能
+        # 凌驾于测量之上。
+        return self._downgrade_plan_quality_if_unexecutable(claimed, fields=fields)
+
+    @staticmethod
+    def _plan_quality_from_slots(fields: Dict[str, Any]) -> str:
         has_action_or_reason = bool(fields.get("action") or fields.get("reason"))
         if not has_action_or_reason:
             return "unknown"
@@ -1072,6 +1086,92 @@ class DecisionSignalService:
         if slots >= 2:
             return "partial"
         return "minimal"
+
+    def _downgrade_plan_quality_if_unexecutable(
+        self,
+        claimed: str,
+        *,
+        fields: Dict[str, Any],
+    ) -> str:
+        """Never let a signal claim a quality its levels do not support."""
+        if claimed in ("minimal", "unknown"):
+            return claimed
+
+        entry_low = fields.get("entry_low")
+        entry_high = fields.get("entry_high")
+        if entry_low is not None and entry_high is not None:
+            entry = (float(entry_low) + float(entry_high)) / 2
+        else:
+            entry = entry_low if entry_low is not None else entry_high
+
+        try:
+            result = validate_levels(
+                action=fields.get("action"),
+                entry=entry,
+                stop_loss=fields.get("stop_loss"),
+                target_price=fields.get("target_price"),
+                horizon=fields.get("horizon"),
+                average_daily_range_pct=self._average_daily_range_pct(
+                    fields.get("stock_code")
+                ),
+            )
+        except Exception:  # 校验本身不得阻断写入
+            logger.warning(
+                "[DecisionSignal] level validation failed to run for %s",
+                fields.get("stock_code"),
+                exc_info=True,
+            )
+            return claimed
+
+        if result.ok:
+            return claimed
+
+        logger.info(
+            "[DecisionSignal] %s %s levels not executable (%s) - plan_quality %s -> partial",
+            fields.get("stock_code"),
+            fields.get("action"),
+            ", ".join(result.issues),
+            claimed,
+        )
+        return "partial"
+
+    def _average_daily_range_pct(self, stock_code: Any) -> Optional[float]:
+        """Recent average (high-low)/open for the code, or None when unavailable.
+
+        Only used for the target-reachability check; returning None skips it and
+        leaves the completeness and geometry checks in force.
+        """
+        code = str(stock_code or "").strip()
+        if not code:
+            return None
+        cache = getattr(self, "_adr_cache", None)
+        if cache is None:
+            cache = self._adr_cache = {}
+        if code in cache:
+            return cache[code]
+        value: Optional[float] = None
+        try:
+            from src.storage import StockDaily
+
+            with self.db.get_session() as session:
+                rows = (
+                    session.query(StockDaily.high, StockDaily.low, StockDaily.open)
+                    .filter(StockDaily.code == code)
+                    .order_by(StockDaily.date.desc())
+                    .limit(60)
+                    .all()
+                )
+            ranges = [
+                (float(h) - float(low)) / float(o) * 100
+                for h, low, o in rows
+                if o and float(o) > 0 and h is not None and low is not None
+            ]
+            if ranges:
+                value = sum(ranges) / len(ranges)
+        except Exception:
+            logger.debug("[DecisionSignal] ADR lookup failed for %s", code, exc_info=True)
+        cache[code] = value
+        return value
 
     def _cached_holding_identities(self, *, account_id: Optional[int]) -> set[Tuple[str, str]]:
         identities = self.portfolio_repo.list_cached_position_identities(account_id=account_id)

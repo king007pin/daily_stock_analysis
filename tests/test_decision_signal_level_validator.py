@@ -127,5 +127,65 @@ class LevelValidatorTestCase(unittest.TestCase):
         self.assertIsNone(result.favourable_days_to_target)
 
 
+class PlanQualityDowngradeTestCase(unittest.TestCase):
+    """plan_quality must reflect what the levels support, not what was claimed.
+
+    Before 2026-08-31 `_normalize_plan_quality` only counted filled slots, so a
+    signal with entry/stop/target/invalidation was labelled ``complete`` even when
+    its geometry was backwards or its target unreachable. 42 signals claimed
+    ``complete`` while 9 of 12 directional ones were not executable.
+    """
+
+    def setUp(self) -> None:
+        from src.services.decision_signal_service import DecisionSignalService
+
+        self.service = DecisionSignalService.__new__(DecisionSignalService)
+        self.service._adr_cache = {}          # skip the DB lookup entirely
+
+    def _quality(self, **fields):
+        fields.setdefault("invalidation", "x")
+        return self.service._normalize_plan_quality(None, fields=fields)
+
+    def test_sound_plan_stays_complete(self) -> None:
+        q = self._quality(
+            stock_code="IDEA.NS", action="buy", horizon="5d",
+            entry_low=14.00, entry_high=14.10, stop_loss=13.85, target_price=14.60,
+        )
+        self.assertEqual(q, "complete")
+
+    def test_inverted_reward_risk_is_downgraded(self) -> None:
+        """Real signal id=48: risking 0.71 to make 0.59."""
+        q = self._quality(
+            stock_code="IDEA.NS", action="buy", horizon="intraday",
+            entry_low=13.79, entry_high=14.04, stop_loss=13.20, target_price=14.50,
+        )
+        self.assertEqual(q, "partial")
+
+    def test_backwards_geometry_is_downgraded(self) -> None:
+        """Real signal id=55: a bearish call with the stop below entry."""
+        q = self._quality(
+            stock_code="BCG.NS", action="reduce", horizon="intraday",
+            entry_low=9.00, entry_high=9.08, stop_loss=8.80, target_price=9.38,
+        )
+        self.assertEqual(q, "partial")
+
+    def test_caller_claim_does_not_override_measurement(self) -> None:
+        """An explicit plan_quality must still be validated."""
+        fields = dict(
+            stock_code="BCG.NS", action="reduce", horizon="intraday",
+            entry_low=9.00, entry_high=9.08, stop_loss=8.80, target_price=9.38,
+            invalidation="x",
+        )
+        self.assertEqual(
+            self.service._normalize_plan_quality("complete", fields=fields), "partial"
+        )
+
+    def test_minimal_is_left_alone(self) -> None:
+        """Nothing to validate when there are no levels to check."""
+        self.assertEqual(
+            self.service._normalize_plan_quality("minimal", fields={"action": "buy"}),
+            "minimal",
+        )
+
 if __name__ == "__main__":
     unittest.main()
