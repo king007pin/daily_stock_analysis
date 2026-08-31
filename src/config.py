@@ -1261,6 +1261,11 @@ class Config:
     # stops already-recorded signals from ever maturing.
     decision_outcome_daily_refill_enabled: bool = False
 
+    # 基准腿（超额收益）同样需要网络取指数数据，因此与上面的 refill 一样默认关闭：
+    # 不配置时行为与之前一致，离线测试套件保持离线。在调度环境中开启 ——
+    # 绝对收益回答不了"这一笔是否跑赢了它所处的市场"。
+    decision_outcome_benchmark_enabled: bool = False
+
     # === Transaction costs (Stage 07) ===
     # Every rate is a FRACTION of turnover, not a percentage: 0.1% is 0.001.
     # All default to None on purpose. src/services/transaction_cost_service.py
@@ -2264,6 +2269,9 @@ class Config:
             ),
             decision_outcome_daily_refill_enabled=parse_env_bool(
                 os.getenv('DECISION_OUTCOME_DAILY_REFILL_ENABLED'), False
+            ),
+            decision_outcome_benchmark_enabled=parse_env_bool(
+                os.getenv('DECISION_OUTCOME_BENCHMARK_ENABLED'), False
             ),
             txn_cost_brokerage_rate=parse_optional_env_float(os.getenv('TXN_COST_BROKERAGE_RATE')),
             txn_cost_brokerage_cap_inr=parse_optional_env_float(os.getenv('TXN_COST_BROKERAGE_CAP_INR')),

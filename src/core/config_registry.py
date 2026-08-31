@@ -85,6 +85,7 @@ WEB_SETTINGS_HIDDEN_FROM_UI = {
     # cannot convey safely; a mistyped tax rate silently corrupts every net
     # return figure. Kept out of the UI deliberately, not by oversight.
     "DECISION_OUTCOME_DAILY_REFILL_ENABLED",
+    "DECISION_OUTCOME_BENCHMARK_ENABLED",
     "TXN_COST_BROKERAGE_RATE",
     "TXN_COST_BROKERAGE_CAP_INR",
     "TXN_COST_STT_MIS_BUY_RATE",

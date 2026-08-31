@@ -1113,6 +1113,15 @@ class DecisionSignalRecord(Base):
     )
 
 
+
+_DECISION_SIGNAL_OUTCOME_BENCHMARK_COLUMN_SQL = {
+    "benchmark_symbol": "VARCHAR(16)",
+    "benchmark_return_pct": "FLOAT",
+    "excess_return_pct": "FLOAT",
+    "benchmark_reason": "VARCHAR(64)",
+}
+
+
 class DecisionSignalOutcomeRecord(Base):
     """Signal-level forward outcome for Issue #1390 P5."""
 
@@ -1143,6 +1152,15 @@ class DecisionSignalOutcomeRecord(Base):
     plan_quality = Column(String(16), index=True)
     data_quality_level = Column(String(24), index=True)
     holding_state = Column(String(16), nullable=False, default='unknown', index=True)
+
+    # Benchmark leg. Absolute return alone cannot say whether a call beat the market
+    # it was taken in: +15% inside a +20% index is underperformance. These are
+    # supplementary — they do not change what `outcome` or `stock_return_pct` mean,
+    # so they do not require a new engine_version.
+    benchmark_symbol = Column(String(16), index=True)
+    benchmark_return_pct = Column(Float)
+    excess_return_pct = Column(Float)
+    benchmark_reason = Column(String(64))
 
     created_at = Column(DateTime, default=utc_naive_now, index=True)
     updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
@@ -1372,6 +1390,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             Base.metadata.create_all(self._engine)
             self._ensure_llm_usage_telemetry_columns()
             self._ensure_decision_signal_profile_schema()
+            self._ensure_decision_signal_outcome_benchmark_columns()
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
             self._ensure_intelligence_items_unique_index()
@@ -1788,6 +1807,35 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                     index_columns.append(column_name)
                 unique_indexes.append(index_columns)
             return unique_indexes
+
+    def _ensure_decision_signal_outcome_benchmark_columns(self) -> None:
+        """Add the nullable benchmark columns to existing SQLite databases."""
+        if not self._is_sqlite_engine:
+            return
+        table = DecisionSignalOutcomeRecord.__tablename__
+        try:
+            existing = {
+                column["name"] for column in inspect(self._engine).get_columns(table)
+            }
+        except Exception as exc:
+            logger.warning(
+                "[DecisionSignalOutcome] failed to inspect benchmark columns; "
+                "skipping best-effort backfill: %s",
+                exc,
+            )
+            return
+
+        for column, column_type in _DECISION_SIGNAL_OUTCOME_BENCHMARK_COLUMN_SQL.items():
+            if column in existing:
+                continue
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+                    )
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, column):
+                    raise
 
     def _ensure_llm_usage_telemetry_columns(self) -> None:
         """Add nullable P0a usage telemetry columns to existing SQLite DBs."""

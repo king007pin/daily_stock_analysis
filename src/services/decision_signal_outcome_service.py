@@ -18,6 +18,7 @@ from src.repositories.decision_signal_outcome_repo import (
 from src.repositories.decision_signal_repo import DecisionSignalRepository
 from src.repositories.stock_repo import StockRepository
 from src.schemas.decision_profile import VALID_DECISION_PROFILES
+from src.services.benchmark_return_service import BenchmarkReturnService
 from src.services.decision_signal_data_quality import normalize_decision_signal_data_quality
 from src.services.decision_signal_service import (
     HORIZONS,
@@ -133,10 +134,19 @@ class DecisionSignalOutcomeService:
         stock_repo: Optional[StockRepository] = None,
         db_manager: Optional[DatabaseManager] = None,
         refill_enabled: Optional[bool] = None,
+        benchmark_service: Optional[BenchmarkReturnService] = None,
     ):
         self.repo = repo or DecisionSignalOutcomeRepository(db_manager)
         self.signal_repo = signal_repo or DecisionSignalRepository(db_manager)
         self.stock_repo = stock_repo or StockRepository(db_manager)
+        # 基准腿要走网络取指数数据，因此与上面的 refill 一样是 opt-in：
+        # 不配置时行为与之前完全一致，离线测试套件也就仍然是离线的。
+        # 显式注入 benchmark_service（测试或调度环境）时视为已启用。
+        self._benchmark_enabled = (
+            True if benchmark_service is not None
+            else self._benchmark_enabled_from_config()
+        )
+        self._benchmark_service = benchmark_service or BenchmarkReturnService()
         # Refilling missing daily bars means a network fetch, so it is opt-in:
         # unset behaves exactly as before, which also keeps the offline test
         # suite offline. Enable it in the scheduled environment, where a stale
@@ -146,6 +156,17 @@ class DecisionSignalOutcomeService:
             if refill_enabled is not None
             else self._refill_enabled_from_config()
         )
+
+    @staticmethod
+    def _benchmark_enabled_from_config() -> bool:
+        try:
+            from src.config import get_config
+
+            return bool(
+                getattr(get_config(), "decision_outcome_benchmark_enabled", False)
+            )
+        except Exception:  # noqa: BLE001 - config must never break evaluation
+            return False
 
     @staticmethod
     def _refill_enabled_from_config() -> bool:
@@ -617,7 +638,7 @@ class DecisionSignalOutcomeService:
                 engine_version=DECISION_SIGNAL_OUTCOME_ENGINE_VERSION,
             ),
         )
-        return {
+        fields = {
             **base,
             "eval_status": evaluation.get("eval_status"),
             "outcome": evaluation.get("outcome"),
@@ -631,6 +652,61 @@ class DecisionSignalOutcomeService:
             "max_high": evaluation.get("max_high"),
             "min_low": evaluation.get("min_low"),
             "stock_return_pct": evaluation.get("stock_return_pct"),
+        }
+        fields.update(
+            self._benchmark_fields(
+                market=signal.market,
+                signal_return_pct=evaluation.get("stock_return_pct"),
+                anchor_date=anchor_date,
+                eval_window_days=eval_days,
+                intraday=horizon == "intraday",
+            )
+        )
+        return fields
+
+    def _benchmark_fields(
+        self,
+        *,
+        market: Optional[str],
+        signal_return_pct: Optional[float],
+        anchor_date: date,
+        eval_window_days: int,
+        intraday: bool,
+    ) -> Dict[str, Any]:
+        """Benchmark leg for one scored signal.
+
+        绝对收益本身回答不了"这一笔是否跑赢了它所处的市场"——+15% 落在 +20%
+        的指数里是跑输。这里补上基准腿与超额收益。
+
+        这些字段是**补充**，不改变 ``outcome`` / ``stock_return_pct`` 的含义，
+        因此不需要新的 ``engine_version``。基准取不到时写入 ``benchmark_reason``
+        并让数值保持为 None —— 缺失不得被记作 0。
+        """
+        if not self._benchmark_enabled:
+            return {"benchmark_reason": "benchmark_disabled"}
+
+        try:
+            result = self._benchmark_service.evaluate_excess_return(
+                market=market or "",
+                signal_return_pct=signal_return_pct,
+                start_date=anchor_date,
+                eval_window_days=eval_window_days,
+                intraday=intraday,
+            )
+        except Exception:
+            logger.warning(
+                "[DecisionSignalOutcome] benchmark evaluation failed market=%s anchor=%s",
+                market,
+                anchor_date,
+                exc_info=True,
+            )
+            return {"benchmark_reason": "benchmark_evaluation_failed"}
+
+        return {
+            "benchmark_symbol": result.benchmark_symbol,
+            "benchmark_return_pct": result.benchmark_return_pct,
+            "excess_return_pct": result.excess_return_pct,
+            "benchmark_reason": result.reason,
         }
 
     @staticmethod
