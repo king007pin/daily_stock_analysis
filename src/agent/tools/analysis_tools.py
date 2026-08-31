@@ -19,6 +19,14 @@ _ANALYSIS_READ_POLICY = ToolPolicy.declared(
     permissions=["market_data:read"],
     scope_dimensions=["stock"],
 )
+# 多标的 / 全市场分析工具：没有单一 stock_code 参数，因此不能声明 "stock" scope。
+# 声明了却没有该参数时，ToolSurface 会以 scope_contract_violation 直接拒绝执行。
+# 命名与 backtest_tools.py 的 _BACKTEST_GLOBAL_READ_POLICY 保持一致。
+_ANALYSIS_GLOBAL_READ_POLICY = ToolPolicy.declared(
+    read_only=True,
+    side_effects=["network_read", "db_read"],
+    permissions=["market_data:read"],
+)
 
 
 def _fetch_trend_data(stock_code: str):
@@ -694,7 +702,7 @@ scrape_live_web_quotes_tool = ToolDefinition(
     ],
     handler=_handle_scrape_live_web_quotes,
     category="analysis",
-    policy=_ANALYSIS_READ_POLICY,
+    policy=_ANALYSIS_GLOBAL_READ_POLICY,
 )
 
 
@@ -729,7 +737,7 @@ scan_pairs_arbitrage_tool = ToolDefinition(
     ],
     handler=_handle_scan_pairs_arbitrage,
     category="analysis",
-    policy=_ANALYSIS_READ_POLICY,
+    policy=_ANALYSIS_GLOBAL_READ_POLICY,
 )
 
 
@@ -750,7 +758,7 @@ get_institutional_flow_tool = ToolDefinition(
     ],
     handler=_handle_get_institutional_flow,
     category="analysis",
-    policy=_ANALYSIS_READ_POLICY,
+    policy=_ANALYSIS_GLOBAL_READ_POLICY,
 )
 
 
@@ -788,7 +796,7 @@ optimize_portfolio_weights_tool = ToolDefinition(
     ],
     handler=_handle_optimize_portfolio_weights,
     category="analysis",
-    policy=_ANALYSIS_READ_POLICY,
+    policy=_ANALYSIS_GLOBAL_READ_POLICY,
 )
 
 
