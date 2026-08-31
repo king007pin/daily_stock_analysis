@@ -200,9 +200,20 @@ def _is_tw_market(code: str) -> bool:
     return is_suffix_market_symbol(code, "tw")
 
 
+# 印度指数代码：Yahoo Finance 用 ``^`` 前缀，没有 .NS/.BO 后缀。
+# 这些代码此前不匹配任何市场判定，于是落入 "cn" 默认分支并被路由到
+# baostock / akshare（A 股数据源），必然失败 —— 基准腿因此长期取不到数据。
+IN_INDEX_CODES = frozenset({"^NSEI", "^BSESN", "^NSEBANK", "^CNXIT"})
+
+
+def _is_in_index_code(code: str) -> bool:
+    """印度指数代码（^NSEI / ^BSESN 等）。"""
+    return (code or "").strip().upper() in IN_INDEX_CODES
+
+
 def _is_in_market(code: str) -> bool:
-    """判定是否为印度 Yahoo Finance suffix 代码（NSE .NS / BSE .BO）。"""
-    return is_suffix_market_symbol(code, "in")
+    """判定是否为印度代码：``.NS`` / ``.BO`` 后缀，或印度指数的 ``^`` 代码。"""
+    return is_suffix_market_symbol(code, "in") or _is_in_index_code(code)
 
 
 def _is_etf_code(code: str) -> bool:

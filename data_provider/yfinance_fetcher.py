@@ -134,6 +134,15 @@ class YfinanceFetcher(BaseFetcher):
             logger.debug(f"识别为美股指数: {code} -> {yf_symbol}")
             return yf_symbol
 
+        # 印度指数：^NSEI / ^BSESN 等。Yahoo 直接认这些符号，但它们既没有
+        # .NS/.BO 后缀也不是美股指数，此前会落到最后的 A 股分支并被加上 .SZ
+        # （^NSEI -> ^NSEI.SZ），Yahoo 自然查不到 —— 基准腿因此一直无数据。
+        from data_provider.base import IN_INDEX_CODES
+
+        if code in IN_INDEX_CODES:
+            logger.debug(f"识别为印度指数代码: {code}")
+            return code
+
         # 美股：1-5 个大写字母（可选 .X 后缀），原样返回
         if is_us_stock_code(code):
             logger.debug(f"识别为美股代码: {code}")
