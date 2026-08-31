@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
+- [新功能] 新增 `src/services/decision_signal_level_validator.py`：校验方向性信号的价位是否构成可执行计划 —— 完整性、几何一致性（方向只来自 `action`，不从 stop/target 大小关系反推）、最低回报风险比 1.2，以及**目标在自身 horizon 内是否可达**（按标的日均振幅折算，并以实测可捕获比例 0.42 修正）。附 11 个用例，数字取自真实信号。
+- [测试] `tests/conftest.py` 新增 session 级 autouse fixture，将 `ENV_FILE` 指向不存在的路径，使离线测试不再读取开发者本机 `.env`。此前有三个用例在 CI（无 `.env`）通过而在本地失败 —— 比单纯的红灯更危险。
+- [修复] `/status` 命令读取了三个不存在的配置字段（`custom_webhook_url`/`serpapi_api_keys`/`searxng_base_url`），因 `getattr` 默认值而静默失效，导致自定义 Webhook、SerpAPI 与 SearXNG 即使已配置也恒显示未启用；同时移除 `gemini_model` 兜底（其硬编码默认值使"主模型: 未配置"分支不可达）。
+- [修复] `/status` 就绪判定收紧：路由模式（llm_channels / litellm_config）下主模型不可达时不再被 legacy provider key 兜底为"系统就绪"，但保留未配置路由时的 legacy key 兼容路径。
+- [修复] `analysis_tools.py` 中 `scrape_live_web_quotes`、`scan_pairs_arbitrage`、`get_institutional_flow`、`optimize_portfolio_weights` 四个多标的工具错误复用了声明 `stock` scope 的策略，但均无 `stock_code` 参数，导致 ToolSurface 以 `scope_contract_violation` 永久拒绝执行；新增 `_ANALYSIS_GLOBAL_READ_POLICY`（对齐 `_BACKTEST_GLOBAL_READ_POLICY`）修正。注意 `scrape_live_web_quotes` 是 AGENTS.md §1.3 指定的真实数据源之一，此前通过 Agent 工具面不可达。
+- [修复] `intelligence_service` 将模块级可变字典 `_DISABLE_REQUEST_PROXIES` 直接传给 `requests.get`；requests 会就地合并环境代理，而 `.env` 中的 `USE_PROXY=false` 被 urllib 解析为 scheme `use`，导致该常量被永久污染，进程内后续所有情报抓取都会带上伪造的 proxy scheme。改为每次请求传副本。
+- [测试] `test_report_schema` 与 `test_market_strategy` 中三个用例依赖仓库根 `.env` 的 `REPORT_LANGUAGE` 而非显式固定语言，在默认 `en` 配置下失败；改为显式注入语言（`_config_override` / `patch(get_config)`），使其可重复。
 - [改进] AIHubMix 注册与引流链接统一使用 inferera.com，改善中国大陆网络直连体验。
 - [修复] 单股推送模式在未配置通知渠道时仍会落盘本地个股报告；CLI 启动分析若因空股票列表、个股结果全失败或本地报告保存失败而未生成报告，会显式返回失败并记录原因。
 - [修复] 合并推送模式下即使个股汇总报告落盘失败，仍会先发送已有的合并通知；仅启用大盘复盘但最终未生成任何复盘内容时，分析任务会显式返回失败。
