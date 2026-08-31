@@ -68,7 +68,7 @@ class StatusCommand(BotCommand):
         llm_model_list = getattr(config, "llm_model_list", []) or []
         llm_model = (getattr(config, "litellm_model", "") or "").strip()
         agent_model = (getattr(config, "agent_litellm_model", "") or "").strip()
-        status["ai_primary_model"] = llm_model or getattr(config, "gemini_model", "")
+        status["ai_primary_model"] = llm_model
         status["ai_agent_model"] = agent_model or "Inherit Primary"
         status["ai_channels"] = [
             str(channel.get("name") or "").strip()
@@ -93,18 +93,33 @@ class StatusCommand(BotCommand):
             and not _uses_direct_env_provider(llm_model)
             and llm_model not in available_router_model_set
         )
+        # 就绪判定需要同时满足：存在主模型，且该主模型确实有可用的解析路径。
+        # 三条互斥的可用路径：
+        #   1. 主模型走 litellm 直连 env provider；
+        #   2. 已配置路由（llm_channels / litellm_config）且主模型在路由集合内 ——
+        #      路由模式优先于 legacy key，主模型不可达时必须报告未就绪；
+        #   3. 未配置路由（legacy_env，集合为空）且存在 legacy provider key ——
+        #      此时"是否在路由中"无意义，但仅有模型名而无任何 key 同样不算就绪。
+        # 旧实现用 `or any(legacy_keys)` 作为全局兜底，会让路由模式下不可达的
+        # 主模型仍显示"系统就绪"，掩盖真实配置错误。
         status["ai_available"] = bool(
-            has_direct_env_model
-            or (available_router_model_set and primary_model_reachable)
-            or any(status["ai_legacy_keys"].values())
+            llm_model
+            and (
+                has_direct_env_model
+                or (available_router_model_set and primary_model_reachable)
+                or (
+                    not available_router_model_set
+                    and any(status["ai_legacy_keys"].values())
+                )
+            )
         )
         
         status["search_bocha"] = bool(getattr(config, "bocha_api_keys", []))
         status["search_tavily"] = bool(getattr(config, "tavily_api_keys", []))
         status["search_brave"] = bool(getattr(config, "brave_api_keys", []))
-        status["search_serpapi"] = bool(getattr(config, "serpapi_api_keys", []))
+        status["search_serpapi"] = bool(getattr(config, "serpapi_keys", []))
         status["search_minimax"] = bool(getattr(config, "minimax_api_keys", []))
-        status["search_searxng"] = bool(getattr(config, "searxng_base_url", None))
+        status["search_searxng"] = bool(getattr(config, "searxng_base_urls", []))
         
         status["notify_wechat"] = bool(getattr(config, "wechat_webhook_url", None))
         status["notify_feishu"] = bool(
@@ -117,7 +132,7 @@ class StatusCommand(BotCommand):
             and getattr(config, "email_password", None)
             and getattr(config, "email_receivers", None)
         )
-        status["notify_custom"] = bool(getattr(config, "custom_webhook_url", None))
+        status["notify_custom"] = bool(getattr(config, "custom_webhook_urls", []))
         status["notify_discord"] = bool(
             getattr(config, "discord_webhook_url", None)
             or (getattr(config, "discord_bot_token", None) and getattr(config, "discord_main_channel_id", None))
