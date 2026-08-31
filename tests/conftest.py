@@ -5,21 +5,51 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import os
 import time
 import threading
 from collections.abc import Awaitable, Callable
 from contextvars import copy_context
 from functools import wraps
+from pathlib import Path
 from typing import Any, TypeVar
 from warnings import warn
 
 import anyio.to_thread
+import pytest
 import fastapi.testclient
 import httpx
 import starlette.testclient
 from anyio._backends import _asyncio
 
 T = TypeVar("T")
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_repo_env_file():
+    """Stop the offline suite from reading the developer's real ``.env``.
+
+    ``Config`` falls back to ``<repo>/.env`` whenever ``ENV_FILE`` is unset, so a
+    developer's own settings leak into every test that does not pin its inputs.
+    That produced a failure mode worse than a plain red suite: three tests passed
+    in CI (which has no ``.env``) and failed locally, because the repo ``.env``
+    sets ``REPORT_LANGUAGE=en`` while the tests assert Chinese output.
+
+    Pointing ``ENV_FILE`` at a path that does not exist makes local runs match CI
+    exactly. Tests that need specific configuration must inject it explicitly —
+    ``monkeypatch.setenv("ENV_FILE", ...)`` still wins for the duration of a test.
+    """
+    previous = os.environ.get("ENV_FILE")
+    os.environ["ENV_FILE"] = str(
+        Path(__file__).resolve().parent / "fixtures" / "__absent__.env"
+    )
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("ENV_FILE", None)
+        else:
+            os.environ["ENV_FILE"] = previous
+
 
 _original_call_soon_threadsafe = asyncio.BaseEventLoop.call_soon_threadsafe
 

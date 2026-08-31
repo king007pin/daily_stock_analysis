@@ -168,6 +168,24 @@ class TestAnalysisReportSchema(unittest.TestCase):
 class TestAnalyzerSchemaFallback(unittest.TestCase):
     """Analyzer fallback when schema validation fails."""
 
+    @staticmethod
+    def _zh_analyzer() -> GeminiAnalyzer:
+        """GeminiAnalyzer pinned to zh output.
+
+        These cases feed Chinese LLM payloads and assert Chinese action labels, so they
+        must not inherit REPORT_LANGUAGE from the repo-root .env. `_config_override` is
+        the analyzer's documented injection point (see `_get_runtime_config`).
+        """
+        import copy
+
+        from src.config import get_config
+
+        analyzer = GeminiAnalyzer()
+        config = copy.copy(get_config())
+        config.report_language = "zh"
+        analyzer._config_override = config
+        return analyzer
+
     def test_parse_response_continues_when_schema_fails(self) -> None:
         """When schema validation fails, analyzer continues with raw dict."""
         analyzer = GeminiAnalyzer()
@@ -186,7 +204,7 @@ class TestAnalyzerSchemaFallback(unittest.TestCase):
 
     def test_parse_response_valid_json_succeeds(self) -> None:
         """Valid JSON produces correct AnalysisResult."""
-        analyzer = GeminiAnalyzer()
+        analyzer = self._zh_analyzer()
         response = json.dumps({
             "stock_name": "贵州茅台",
             "sentiment_score": 72,
@@ -205,7 +223,7 @@ class TestAnalyzerSchemaFallback(unittest.TestCase):
         self.assertEqual(result.action_label, "持有")
 
     def test_parse_response_preserves_explicit_action_in_raw_result(self) -> None:
-        analyzer = GeminiAnalyzer()
+        analyzer = self._zh_analyzer()
         response = json.dumps({
             "stock_name": "贵州茅台",
             "sentiment_score": 58,
