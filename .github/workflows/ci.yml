@@ -9,6 +9,9 @@ on:
   # 补上 push 触发，使直推 main 也必须通过同一道门。
   push:
     branches: [main]
+  # 手动触发入口：便于在未产生新提交时按需验证 backend-gate，
+  # 也是 fork 首次启用 Actions 后确认流水线可用的最小手段。
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
