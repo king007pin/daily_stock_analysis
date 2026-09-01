@@ -16,7 +16,15 @@ from sqlalchemy.sql import func
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.config import Config
-from src.storage import Base, CURRENT_SCHEMA_VERSION, DatabaseManager, DatabaseSchemaMigration, StockDaily
+from src.storage import (
+    BAR_RECONCILIATION_STATUS_QUARANTINED,
+    Base,
+    BarReconciliationRecord,
+    CURRENT_SCHEMA_VERSION,
+    DatabaseManager,
+    DatabaseSchemaMigration,
+    StockDaily,
+)
 
 class TestStorage(unittest.TestCase):
 
@@ -1157,6 +1165,317 @@ class TestStorage(unittest.TestCase):
         finally:
             temp_dir.cleanup()
             DatabaseManager.reset_instance()
+
+    _LEGACY_STOCK_DAILY_DDL = """CREATE TABLE stock_daily (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code VARCHAR(10) NOT NULL,
+        date DATE NOT NULL,
+        open FLOAT,
+        high FLOAT,
+        low FLOAT,
+        close FLOAT,
+        volume FLOAT,
+        amount FLOAT,
+        pct_chg FLOAT,
+        ma5 FLOAT,
+        ma10 FLOAT,
+        ma20 FLOAT,
+        volume_ratio FLOAT,
+        data_source VARCHAR(50),
+        created_at DATETIME,
+        updated_at DATETIME,
+        CONSTRAINT uix_code_date UNIQUE (code, date)
+    )"""
+
+    @staticmethod
+    def _list_sqlite_columns(db_path: str, table_name: str) -> list:
+        with sqlite3.connect(db_path) as conn:
+            return [
+                row[1]
+                for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            ]
+
+    def test_legacy_stock_daily_gains_delivery_columns_without_losing_rows(self) -> None:
+        """Legacy stock_daily tables get delivery columns added, keeping existing bars."""
+        temp_dir = tempfile.TemporaryDirectory()
+        db_path = os.path.join(temp_dir.name, "legacy_stock_daily.db")
+
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(self._LEGACY_STOCK_DAILY_DDL)
+                conn.execute(
+                    "INSERT INTO stock_daily (code, date, open, high, low, close, volume, data_source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ('IDEA', '2026-08-28', 7.0, 7.4, 6.9, 7.2, 1000.0, 'legacy'),
+                )
+
+            columns_before = self._list_sqlite_columns(db_path, "stock_daily")
+            self.assertNotIn("delivery_qty", columns_before)
+            self.assertNotIn("delivery_pct", columns_before)
+
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+            DatabaseManager(db_url=f"sqlite:///{db_path}")
+
+            columns_after = self._list_sqlite_columns(db_path, "stock_daily")
+            self.assertIn("delivery_qty", columns_after)
+            self.assertIn("delivery_pct", columns_after)
+
+            with sqlite3.connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT close, delivery_qty, delivery_pct FROM stock_daily WHERE code = 'IDEA'"
+                ).fetchone()
+
+            # Existing bar survives; the new columns start empty, never estimated.
+            self.assertEqual(row[0], 7.2)
+            self.assertIsNone(row[1])
+            self.assertIsNone(row[2])
+        finally:
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+            temp_dir.cleanup()
+
+    def test_delivery_column_migration_is_idempotent(self) -> None:
+        """Re-running the delivery migration is safe and adds no duplicate columns."""
+        temp_dir = tempfile.TemporaryDirectory()
+        db_path = os.path.join(temp_dir.name, "idempotent_delivery.db")
+
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(self._LEGACY_STOCK_DAILY_DDL)
+
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+            db = DatabaseManager(db_url=f"sqlite:///{db_path}")
+
+            db._ensure_stock_daily_delivery_columns()
+            db._ensure_stock_daily_delivery_columns()
+
+            columns = self._list_sqlite_columns(db_path, "stock_daily")
+            self.assertEqual(columns.count("delivery_qty"), 1)
+            self.assertEqual(columns.count("delivery_pct"), 1)
+
+            # A second DatabaseManager init over the same file must also stay clean.
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+            DatabaseManager(db_url=f"sqlite:///{db_path}")
+            self.assertEqual(
+                self._list_sqlite_columns(db_path, "stock_daily").count("delivery_pct"),
+                1,
+            )
+        finally:
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+            temp_dir.cleanup()
+
+    def test_update_stock_daily_delivery_round_trips_and_needs_existing_bar(self) -> None:
+        """Delivery metrics persist onto an existing bar and are never invented."""
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+        db = DatabaseManager(db_url="sqlite:///:memory:")
+
+        try:
+            db.save_daily_data(
+                pd.DataFrame(
+                    [
+                        {
+                            'date': date(2026, 8, 28),
+                            'open': 7.0,
+                            'high': 7.4,
+                            'low': 6.9,
+                            'close': 7.2,
+                            'volume': 1000.0,
+                        }
+                    ]
+                ),
+                code='IDEA',
+                data_source='test',
+            )
+
+            self.assertTrue(
+                db.update_stock_daily_delivery(
+                    'IDEA', date(2026, 8, 28), delivery_qty=131.4, delivery_pct=13.14
+                )
+            )
+            # No bar for that date: refuse to silently create one.
+            self.assertFalse(
+                db.update_stock_daily_delivery(
+                    'IDEA', date(2026, 8, 27), delivery_qty=1.0, delivery_pct=1.0
+                )
+            )
+
+            with db.get_session() as session:
+                row = session.execute(
+                    select(StockDaily).where(
+                        and_(
+                            StockDaily.code == 'IDEA',
+                            StockDaily.date == date(2026, 8, 28),
+                        )
+                    )
+                ).scalar_one()
+                self.assertAlmostEqual(row.delivery_qty, 131.4)
+                self.assertAlmostEqual(row.delivery_pct, 13.14)
+                self.assertIn('delivery_pct', row.to_dict())
+
+                missing = session.execute(
+                    select(func.count()).select_from(StockDaily).where(
+                        and_(
+                            StockDaily.code == 'IDEA',
+                            StockDaily.date == date(2026, 8, 27),
+                        )
+                    )
+                ).scalar()
+                self.assertEqual(missing, 0)
+        finally:
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+
+    def test_bar_reconciliation_record_round_trips_both_values(self) -> None:
+        """A quarantined bar keeps the stored value, the official value and the gap."""
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+        db = DatabaseManager(db_url="sqlite:///:memory:")
+
+        try:
+            result = db.upsert_bar_reconciliation_records(
+                [
+                    {
+                        'code': 'IDEA',
+                        'source_symbol': 'IDEA',
+                        'trade_date': date(2026, 8, 28),
+                        'field_name': 'close',
+                        'stored_value': 7.2,
+                        'official_value': 7.35,
+                        'abs_diff': 0.15,
+                        'diff_pct': 2.0833,
+                        'stored_data_source': 'YFinanceFetcher',
+                        'note': 'vendor close disagrees with bhavcopy',
+                    }
+                ]
+            )
+            self.assertEqual(result, {'inserted': 1, 'updated': 0})
+
+            with db.get_session() as session:
+                row = session.execute(select(BarReconciliationRecord)).scalar_one()
+                payload = row.to_dict()
+
+            self.assertEqual(payload['code'], 'IDEA')
+            self.assertEqual(payload['source_symbol'], 'IDEA')
+            self.assertEqual(payload['trade_date'], date(2026, 8, 28))
+            self.assertEqual(payload['field_name'], 'close')
+            self.assertAlmostEqual(payload['stored_value'], 7.2)
+            self.assertAlmostEqual(payload['official_value'], 7.35)
+            self.assertAlmostEqual(payload['abs_diff'], 0.15)
+            self.assertAlmostEqual(payload['diff_pct'], 2.0833)
+            self.assertEqual(payload['source'], 'nse_bhavcopy')
+            self.assertEqual(payload['stored_data_source'], 'YFinanceFetcher')
+            self.assertEqual(payload['status'], BAR_RECONCILIATION_STATUS_QUARANTINED)
+            self.assertIsNotNone(payload['detected_at'])
+            self.assertIsNotNone(payload['updated_at'])
+        finally:
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+
+    def test_bar_reconciliation_upsert_is_idempotent_per_field(self) -> None:
+        """Re-running reconciliation updates in place and keeps first-detection time."""
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+        db = DatabaseManager(db_url="sqlite:///:memory:")
+
+        try:
+            base_record = {
+                'code': 'IDEA',
+                'trade_date': date(2026, 8, 28),
+                'field_name': 'close',
+                'stored_value': 7.2,
+                'official_value': 7.35,
+                'abs_diff': 0.15,
+                'diff_pct': 2.0833,
+            }
+            db.upsert_bar_reconciliation_records([dict(base_record)])
+
+            with db.get_session() as session:
+                first_detected_at = session.execute(
+                    select(BarReconciliationRecord.detected_at)
+                ).scalar_one()
+
+            second = db.upsert_bar_reconciliation_records(
+                [dict(base_record, official_value=7.40, abs_diff=0.20, diff_pct=2.7778)]
+            )
+            self.assertEqual(second, {'inserted': 0, 'updated': 1})
+
+            # A different field on the same day is separate evidence, not a rewrite.
+            third = db.upsert_bar_reconciliation_records(
+                [
+                    dict(
+                        base_record,
+                        field_name='volume',
+                        stored_value=1000.0,
+                        official_value=1200.0,
+                        abs_diff=200.0,
+                        diff_pct=20.0,
+                    )
+                ]
+            )
+            self.assertEqual(third, {'inserted': 1, 'updated': 0})
+
+            with db.get_session() as session:
+                total = session.execute(
+                    select(func.count()).select_from(BarReconciliationRecord)
+                ).scalar()
+                close_row = session.execute(
+                    select(BarReconciliationRecord).where(
+                        BarReconciliationRecord.field_name == 'close'
+                    )
+                ).scalar_one()
+                self.assertAlmostEqual(close_row.official_value, 7.40)
+                self.assertAlmostEqual(close_row.stored_value, 7.2)
+                self.assertEqual(close_row.detected_at, first_detected_at)
+
+            self.assertEqual(total, 2)
+        finally:
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+
+    def test_bar_reconciliation_unique_index_covers_reconciliation_key(self) -> None:
+        """The quarantine table is keyed by (code, trade_date, field_name, source)."""
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+        temp_dir = tempfile.TemporaryDirectory()
+        db_path = os.path.join(temp_dir.name, "bar_reconciliation_indexes.db")
+
+        try:
+            DatabaseManager(db_url=f"sqlite:///{db_path}")
+
+            unique_indexes = self._list_sqlite_unique_indexes(
+                db_path, "bar_reconciliation_records"
+            )
+            self.assertTrue(
+                any(
+                    columns[:4] == ['code', 'trade_date', 'field_name', 'source']
+                    for columns in unique_indexes.values()
+                ),
+                unique_indexes,
+            )
+
+            indexes = self._list_sqlite_indexes(db_path, "bar_reconciliation_records")
+            self.assertEqual(
+                indexes.get("ix_bar_reconciliation_date_field"),
+                ['trade_date', 'field_name'],
+            )
+            self.assertEqual(
+                indexes.get("ix_bar_reconciliation_code_date"),
+                ['code', 'trade_date'],
+            )
+            self.assertEqual(
+                indexes.get("ix_bar_reconciliation_status_detected"),
+                ['status', 'detected_at'],
+            )
+        finally:
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+            temp_dir.cleanup()
+
 
 if __name__ == '__main__':
     unittest.main()

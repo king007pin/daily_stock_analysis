@@ -130,7 +130,12 @@ class StockDaily(Base):
     ma5 = Column(Float)
     ma10 = Column(Float)
     ma20 = Column(Float)
-    volume_ratio = Column(Float)  # 量比
+    volume_ratio = Column(Float)
+
+    # 交割数据（当前仅 NSE bhavcopy 提供，其他市场为空）
+    # delivery_qty: 实际交收股数；delivery_pct: 交收股数占成交量比例（%）
+    delivery_qty = Column(Float)
+    delivery_pct = Column(Float)  # 量比
     
     # 数据来源
     data_source = Column(String(50))  # 记录数据来源（如 AkshareFetcher）
@@ -164,6 +169,8 @@ class StockDaily(Base):
             'ma10': self.ma10,
             'ma20': self.ma20,
             'volume_ratio': self.volume_ratio,
+            'delivery_qty': self.delivery_qty,
+            'delivery_pct': self.delivery_pct,
             'data_source': self.data_source,
         }
 
@@ -1114,12 +1121,134 @@ class DecisionSignalRecord(Base):
 
 
 
+_STOCK_DAILY_DELIVERY_COLUMN_SQL: Dict[str, str] = {
+    "delivery_qty": "FLOAT",
+    "delivery_pct": "FLOAT",
+}
+
+
 _DECISION_SIGNAL_OUTCOME_BENCHMARK_COLUMN_SQL = {
     "benchmark_symbol": "VARCHAR(16)",
     "benchmark_return_pct": "FLOAT",
     "excess_return_pct": "FLOAT",
     "benchmark_reason": "VARCHAR(64)",
 }
+
+
+# bar 对账（quarantine）相关常量
+# 官方源标识：当前只有 NSE bhavcopy 一个权威日线源
+BAR_RECONCILIATION_SOURCE_NSE_BHAVCOPY = 'nse_bhavcopy'
+# 记录状态：默认隔离（保留分歧证据），人工/后续流程确认后才流转
+BAR_RECONCILIATION_STATUS_QUARANTINED = 'quarantined'
+BAR_RECONCILIATION_STATUS_ACCEPTED = 'accepted'      # 采信官方值
+BAR_RECONCILIATION_STATUS_REJECTED = 'rejected'      # 采信本地值（官方值判定为异常）
+BAR_RECONCILIATION_STATUSES = (
+    BAR_RECONCILIATION_STATUS_QUARANTINED,
+    BAR_RECONCILIATION_STATUS_ACCEPTED,
+    BAR_RECONCILIATION_STATUS_REJECTED,
+)
+
+
+class BarReconciliationRecord(Base):
+    """
+    日线 bar 对账隔离表
+
+    设计前提：**分歧 bar 本身是证据，不能被静默覆盖**。
+    本地已存 bar 与官方发布值不一致时，这里按“字段级”落一条隔离记录，
+    同时保留本地值与官方值，用于统计数据源错误率，而不是直接改写 stock_daily。
+
+    幂等性：唯一约束 `(code, trade_date, field_name, source)`，
+    同一交易日重复跑对账只会更新既有记录（值、幅度、检测时间），不会产生重复行。
+    """
+    __tablename__ = 'bar_reconciliation_records'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # 本地 stock_daily.code（可能带市场后缀）
+    code = Column(String(16), nullable=False, index=True)
+    # 官方源里的代码（如 NSE SYMBOL，不带后缀）；与 code 不一定相同
+    source_symbol = Column(String(32), index=True)
+    # 分歧所属交易日
+    trade_date = Column(Date, nullable=False, index=True)
+
+    # 发生分歧的字段：open/high/low/close/volume/delivery_qty/delivery_pct
+    field_name = Column(String(24), nullable=False, index=True)
+    # 我们库里存的值
+    stored_value = Column(Float)
+    # 官方发布的值
+    official_value = Column(Float)
+    # 分歧幅度：绝对差与相对差（%），便于按幅度筛选与统计
+    abs_diff = Column(Float)
+    diff_pct = Column(Float)
+
+    # 官方源标识（默认 NSE bhavcopy）
+    source = Column(
+        String(32),
+        nullable=False,
+        default=BAR_RECONCILIATION_SOURCE_NSE_BHAVCOPY,
+        index=True,
+    )
+    # 本地 bar 的原始数据来源（stock_daily.data_source），用于定位是哪个 vendor 出错
+    stored_data_source = Column(String(50), index=True)
+
+    status = Column(
+        String(16),
+        nullable=False,
+        default=BAR_RECONCILIATION_STATUS_QUARANTINED,
+        index=True,
+    )
+    # 补充说明（例如：本地缺该字段、官方缺该字段）
+    note = Column(Text)
+
+    # 检测时间（首次发现）与最近一次对账更新时间
+    detected_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    updated_at = Column(
+        DateTime,
+        default=utc_naive_now,
+        onupdate=utc_naive_now,
+        nullable=False,
+        index=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            'code',
+            'trade_date',
+            'field_name',
+            'source',
+            name='uix_bar_reconciliation_key',
+        ),
+        Index('ix_bar_reconciliation_date_field', 'trade_date', 'field_name'),
+        Index('ix_bar_reconciliation_code_date', 'code', 'trade_date'),
+        Index('ix_bar_reconciliation_status_detected', 'status', 'detected_at'),
+    )
+
+    def __repr__(self):
+        return (
+            f"<BarReconciliationRecord(code={self.code}, trade_date={self.trade_date}, "
+            f"field={self.field_name}, stored={self.stored_value}, "
+            f"official={self.official_value})>"
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            'id': self.id,
+            'code': self.code,
+            'source_symbol': self.source_symbol,
+            'trade_date': self.trade_date,
+            'field_name': self.field_name,
+            'stored_value': self.stored_value,
+            'official_value': self.official_value,
+            'abs_diff': self.abs_diff,
+            'diff_pct': self.diff_pct,
+            'source': self.source,
+            'stored_data_source': self.stored_data_source,
+            'status': self.status,
+            'note': self.note,
+            'detected_at': self.detected_at,
+            'updated_at': self.updated_at,
+        }
 
 
 class DecisionSignalOutcomeRecord(Base):
@@ -1390,6 +1519,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             Base.metadata.create_all(self._engine)
             self._ensure_llm_usage_telemetry_columns()
             self._ensure_decision_signal_profile_schema()
+            self._ensure_stock_daily_delivery_columns()
             self._ensure_decision_signal_outcome_benchmark_columns()
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
@@ -1808,6 +1938,36 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 unique_indexes.append(index_columns)
             return unique_indexes
 
+    def _ensure_stock_daily_delivery_columns(self) -> None:
+        """Add the nullable delivery columns to existing SQLite databases."""
+        if not self._is_sqlite_engine:
+            return
+        table = StockDaily.__tablename__
+        try:
+            existing = {
+                column["name"] for column in inspect(self._engine).get_columns(table)
+            }
+        except Exception as exc:
+            logger.error(
+                "[StockDaily] 交割列迁移前的表结构探测失败，无法安全继续: %s",
+                exc,
+            )
+            raise
+
+        for column, column_type in _STOCK_DAILY_DELIVERY_COLUMN_SQL.items():
+            if column in existing:
+                continue
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+                    )
+                existing.add(column)
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, column):
+                    raise
+                existing.add(column)
+
     def _ensure_decision_signal_outcome_benchmark_columns(self) -> None:
         """Add the nullable benchmark columns to existing SQLite databases."""
         if not self._is_sqlite_engine:
@@ -1836,6 +1996,170 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             except OperationalError as exc:
                 if not self._is_sqlite_duplicate_column_error(exc, column):
                     raise
+
+    def update_stock_daily_delivery(
+        self,
+        code: str,
+        trade_date: date,
+        delivery_qty: Optional[float] = None,
+        delivery_pct: Optional[float] = None,
+    ) -> bool:
+        """
+        更新已存在日线 bar 的交割数据（delivery_qty / delivery_pct）
+
+        只更新已存在的 bar：官方交割数据不构成一条完整行情，
+        缺失 bar 时不会凭空创建记录，直接返回 False 由调用方处理。
+
+        Args:
+            code: 股票代码（stock_daily.code）
+            trade_date: 交易日
+            delivery_qty: 交收股数，None 表示官方未提供，保持原值不变
+            delivery_pct: 交收占比（%），None 表示官方未提供，保持原值不变
+
+        Returns:
+            True 表示命中并更新了一条 bar；False 表示该 bar 不存在
+        """
+        normalized_date = self._normalize_daily_date(trade_date)
+
+        def _write(session: Session) -> bool:
+            row = session.execute(
+                select(StockDaily).where(
+                    and_(
+                        StockDaily.code == code,
+                        StockDaily.date == normalized_date,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            if delivery_qty is not None:
+                row.delivery_qty = self._normalize_sql_value(delivery_qty)
+            if delivery_pct is not None:
+                row.delivery_pct = self._normalize_sql_value(delivery_pct)
+            row.updated_at = datetime.now()
+            return True
+
+        return self._run_write_transaction(
+            f"update_stock_daily_delivery[{code}:{normalized_date}]",
+            _write,
+        )
+
+    def upsert_bar_reconciliation_records(
+        self,
+        records: List[Dict[str, Any]],
+    ) -> Dict[str, int]:
+        """
+        写入 bar 对账隔离记录（幂等）
+
+        以 `(code, trade_date, field_name, source)` 为唯一键：
+        重复对账同一交易日只会刷新既有记录的值与 `updated_at`，
+        `detected_at`（首次发现时间）保持不变，也不会产生重复行。
+
+        Args:
+            records: 隔离记录字典列表，必填键 code / trade_date / field_name，
+                其余字段（source_symbol、stored_value、official_value、abs_diff、
+                diff_pct、source、stored_data_source、status、note）可选
+
+        Returns:
+            {'inserted': 新增条数, 'updated': 更新条数}
+        """
+        if not records:
+            return {'inserted': 0, 'updated': 0}
+
+        now = utc_naive_now()
+        normalized: Dict[Tuple[str, date, str, str], Dict[str, Any]] = {}
+        for record in records:
+            code = record.get('code')
+            field_name = record.get('field_name')
+            if not code or not field_name:
+                raise ValueError("bar 对账记录缺少 code 或 field_name")
+            trade_date = self._normalize_daily_date(record.get('trade_date'))
+            source = record.get('source') or BAR_RECONCILIATION_SOURCE_NSE_BHAVCOPY
+            normalized[(code, trade_date, field_name, source)] = {
+                'code': code,
+                'source_symbol': record.get('source_symbol'),
+                'trade_date': trade_date,
+                'field_name': field_name,
+                'stored_value': self._normalize_sql_value(record.get('stored_value')),
+                'official_value': self._normalize_sql_value(record.get('official_value')),
+                'abs_diff': self._normalize_sql_value(record.get('abs_diff')),
+                'diff_pct': self._normalize_sql_value(record.get('diff_pct')),
+                'source': source,
+                'stored_data_source': record.get('stored_data_source'),
+                'status': record.get('status') or BAR_RECONCILIATION_STATUS_QUARANTINED,
+                'note': record.get('note'),
+                'detected_at': record.get('detected_at') or now,
+                'updated_at': now,
+            }
+
+        def _write(session: Session) -> Dict[str, int]:
+            existing_keys = set()
+            for key in normalized:
+                code, trade_date, field_name, source = key
+                hit = session.execute(
+                    select(BarReconciliationRecord.id).where(
+                        and_(
+                            BarReconciliationRecord.code == code,
+                            BarReconciliationRecord.trade_date == trade_date,
+                            BarReconciliationRecord.field_name == field_name,
+                            BarReconciliationRecord.source == source,
+                        )
+                    )
+                ).scalar()
+                if hit is not None:
+                    existing_keys.add(key)
+
+            for key, values in normalized.items():
+                if self._is_sqlite_engine:
+                    statement = sqlite_insert(BarReconciliationRecord).values(**values)
+                    excluded = statement.excluded
+                    session.execute(
+                        statement.on_conflict_do_update(
+                            index_elements=[
+                                'code', 'trade_date', 'field_name', 'source',
+                            ],
+                            # detected_at 保留首次发现时间，不随重跑刷新
+                            set_={
+                                'source_symbol': excluded.source_symbol,
+                                'stored_value': excluded.stored_value,
+                                'official_value': excluded.official_value,
+                                'abs_diff': excluded.abs_diff,
+                                'diff_pct': excluded.diff_pct,
+                                'stored_data_source': excluded.stored_data_source,
+                                'status': excluded.status,
+                                'note': excluded.note,
+                                'updated_at': excluded.updated_at,
+                            },
+                        )
+                    )
+                elif key in existing_keys:
+                    code, trade_date, field_name, source = key
+                    row = session.execute(
+                        select(BarReconciliationRecord).where(
+                            and_(
+                                BarReconciliationRecord.code == code,
+                                BarReconciliationRecord.trade_date == trade_date,
+                                BarReconciliationRecord.field_name == field_name,
+                                BarReconciliationRecord.source == source,
+                            )
+                        )
+                    ).scalar_one()
+                    for column, value in values.items():
+                        if column == 'detected_at':
+                            continue
+                        setattr(row, column, value)
+                else:
+                    session.add(BarReconciliationRecord(**values))
+
+            return {
+                'inserted': len(normalized) - len(existing_keys),
+                'updated': len(existing_keys),
+            }
+
+        return self._run_write_transaction(
+            "upsert_bar_reconciliation_records",
+            _write,
+        )
 
     def _ensure_llm_usage_telemetry_columns(self) -> None:
         """Add nullable P0a usage telemetry columns to existing SQLite DBs."""
