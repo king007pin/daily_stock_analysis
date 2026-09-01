@@ -37,7 +37,7 @@ Design rules:
 import argparse
 import logging
 import sys
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -85,6 +85,11 @@ MUHURAT_SESSIONS = frozenset({"2026-11-08"})
 # NSE regular equity session (IST wall clock).
 SESSION_OPEN = time(9, 15)
 SESSION_CLOSE = time(15, 30)
+
+# How far back ``previous_nse_trading_day`` will walk before giving up. The longest
+# closed stretch in the 2026 calendar is 4 days (Sat-Tue, Dussehra); 10 leaves room
+# for a future year's longer block without ever returning a date from last month.
+DEFAULT_TRADING_DAY_LOOKBACK_DAYS = 10
 
 
 def _error_reason(exc: Exception) -> str:
@@ -168,6 +173,44 @@ def is_nse_session_now(now: Optional[datetime] = None) -> Tuple[bool, str]:
         reason = _error_reason(exc)
         logger.warning("nse_trading_day_guard.is_nse_session_now fail-closed: %s", exc)
         return False, reason
+
+
+def previous_nse_trading_day(
+    before: Optional[date] = None,
+    *,
+    max_lookback_days: int = DEFAULT_TRADING_DAY_LOOKBACK_DAYS,
+) -> Optional[date]:
+    """Return the most recent NSE trading day strictly before ``before``.
+
+    ``before`` defaults to today in IST, so the answer is the latest session
+    whose end-of-day data the exchange has already published - never today,
+    whose bhavcopy does not exist until after the close.
+
+    FAIL-CLOSED, like the rest of this module: returns ``None`` when no open
+    day is found within ``max_lookback_days``. A holiday block longer than the
+    window, or a calendar that cannot be consulted at all, must produce "I do
+    not know" rather than a guessed date, because callers use this to decide
+    which day's official data to fetch.
+    """
+    try:
+        anchor = _to_date(before)
+        for offset in range(1, max(1, int(max_lookback_days)) + 1):
+            candidate = anchor - timedelta(days=offset)
+            is_open, _reason = is_nse_trading_day(candidate)
+            if is_open:
+                return candidate
+        logger.warning(
+            "nse_trading_day_guard.previous_nse_trading_day found no open session in "
+            "the %s days before %s",
+            max_lookback_days,
+            anchor.isoformat(),
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 - fail-closed by design
+        logger.warning(
+            "nse_trading_day_guard.previous_nse_trading_day fail-closed: %s", exc
+        )
+        return None
 
 
 def main(argv: Optional[List[str]] = None) -> int:

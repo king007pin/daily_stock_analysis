@@ -260,3 +260,77 @@ class TestCli:
 
         monkeypatch.setattr(guard, "is_nse_session_now", lambda *a, **k: (False, "out of session (stubbed)"))
         assert guard.main(["--check-session"]) == 1
+
+
+class TestPreviousTradingDay:
+    """
+    ``previous_nse_trading_day`` names the last session whose end-of-day data the
+    exchange has already published. The bhavcopy reconciliation scheduled in
+    ``main._run_bhavcopy_reconciliation`` uses it to decide which day's official
+    file to fetch, so "today" and "a guessed date" are both wrong answers.
+
+    Deterministic: every case injects an explicit ``before`` date.
+    """
+
+    def test_monday_looks_back_to_the_friday_session(self):
+        assert guard.previous_nse_trading_day(KNOWN_OPEN_DAY) == date(2026, 8, 21)
+
+    def test_it_never_returns_the_anchor_itself(self):
+        """Strictly before: today's bhavcopy does not exist until after the close."""
+        result = guard.previous_nse_trading_day(KNOWN_OPEN_DAY)
+        assert result is not None and result < KNOWN_OPEN_DAY
+
+    def test_it_skips_a_holiday_that_falls_on_a_weekday(self):
+        """2026-10-20 is Dussehra, so the Wednesday after it looks back to Monday."""
+        assert guard.previous_nse_trading_day(date(2026, 10, 21)) == date(2026, 10, 19)
+
+    def test_it_skips_a_holiday_and_the_weekend_behind_it(self):
+        """2026-01-26 is Republic Day (Monday), so Tuesday looks back to Friday 01-23."""
+        assert guard.previous_nse_trading_day(date(2026, 1, 27)) == date(2026, 1, 23)
+
+    def test_a_saturday_anchor_still_finds_the_friday_session(self):
+        """The anchor itself need not be a trading day - the cron may fire on a weekend."""
+        assert guard.previous_nse_trading_day(date(2026, 8, 22)) == date(2026, 8, 21)
+
+    def test_every_result_is_itself_an_open_session(self):
+        for anchor in (KNOWN_OPEN_DAY, date(2026, 10, 21), date(2026, 1, 27), date(2026, 8, 22)):
+            result = guard.previous_nse_trading_day(anchor)
+            assert result is not None, f"no session found before {anchor.isoformat()}"
+            _assert_open(guard.is_nse_trading_day(result), f"result for anchor {anchor.isoformat()}")
+
+    def test_no_open_day_in_the_window_returns_none(self, monkeypatch):
+        """Fail-CLOSED: an unbroken closed stretch must produce 'I do not know', not a date."""
+        monkeypatch.setattr(guard, "is_nse_trading_day", lambda *a, **k: (False, "closed (stubbed)"))
+        assert guard.previous_nse_trading_day(KNOWN_OPEN_DAY) is None
+
+    def test_a_broken_calendar_returns_none(self, monkeypatch):
+        """``is_nse_trading_day`` is already fail-closed; the walk must not paper over it."""
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("calendar data unavailable")
+
+        monkeypatch.setattr(trading_calendar, "is_market_open", explode)
+        assert guard.previous_nse_trading_day(KNOWN_OPEN_DAY) is None
+
+    def test_lookback_window_is_respected(self, monkeypatch):
+        """A window too short to reach the Friday session returns None rather than reaching past it."""
+        assert guard.previous_nse_trading_day(KNOWN_OPEN_DAY, max_lookback_days=2) is None
+        assert guard.previous_nse_trading_day(KNOWN_OPEN_DAY, max_lookback_days=3) == date(2026, 8, 21)
+
+    def test_default_anchor_is_today_in_ist(self, monkeypatch):
+        """``before=None`` must mean 'today in IST', not a bare naive ``date.today()``.
+
+        The clock is frozen by injection rather than read: 2026-08-24 18:00 IST is
+        22:30 on 2026-08-23 UTC, so a host running in UTC would answer Thursday
+        2026-08-20 here if the helper ever resolved "today" outside IST.
+        """
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 8, 24, 18, 0, tzinfo=IST)
+
+        monkeypatch.setattr(guard, "datetime", FrozenDatetime)
+        assert guard.previous_nse_trading_day() == date(2026, 8, 21)
+
+    def test_the_default_lookback_covers_the_longest_closed_stretch_of_the_year(self):
+        """Guards the constant against being trimmed below what the calendar actually needs."""
+        assert guard.DEFAULT_TRADING_DAY_LOOKBACK_DAYS >= 5

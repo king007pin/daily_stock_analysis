@@ -755,6 +755,60 @@ def _run_decision_signal_outcomes(config: Config) -> None:
         logger.warning(f"决策信号结果评估失败（已忽略）: {exc}")
 
 
+def _run_bhavcopy_reconciliation(config: Config) -> None:
+    """Reconcile stored NSE daily bars against the exchange bhavcopy, fail-soft.
+
+    ``BhavcopyReconciliationService.reconcile`` previously had no production
+    caller at all: the service could quarantine bars that disagree with NSE's
+    own published file and backfill the missing delivery fields, but nothing
+    ever asked it to, so no reconciliation evidence could accrue. This is the
+    scheduled entry point.
+
+    Deliberately runs after ``_run_auto_backtest`` and
+    ``_run_decision_signal_outcomes``: this is the only one of the three that
+    reaches the network (30s timeout per bhavcopy fetch), and a slow NSE must
+    not delay evaluators that need no network at all.
+
+    Reconciles the last completed NSE trading day, never today - today's
+    bhavcopy does not exist until after the close - and skips entirely when the
+    calendar cannot confirm a date, rather than guessing one. A skipped run
+    leaves that day unreconciled until someone re-runs it; re-running is safe,
+    because quarantine rows are deduplicated per trade date and existing
+    delivery values are never overwritten.
+
+    Fail-soft: a reconciliation problem must never take down the analysis run.
+    """
+
+    try:
+        if not getattr(config, 'bhavcopy_reconciliation_enabled', False):
+            return
+
+        from src.services.bhavcopy_reconciliation_service import (
+            BhavcopyReconciliationService,
+        )
+        from src.services.nse_trading_day_guard import previous_nse_trading_day
+
+        trade_date = previous_nse_trading_day()
+        if trade_date is None:
+            logger.warning("bhavcopy 对账跳过：未能确定最近一个已收盘的 NSE 交易日")
+            return
+
+        logger.info(f"开始 bhavcopy 对账: trade_date={trade_date.isoformat()}")
+        service = BhavcopyReconciliationService()
+        summary = service.reconcile(trade_date)
+        logger.info(
+            f"bhavcopy 对账完成: status={summary.get('status')} "
+            f"compared={summary.get('compared')} agreed={summary.get('agreed')} "
+            f"quarantined={summary.get('quarantined')} "
+            f"written={summary.get('quarantine_records_written')} "
+            f"delivery_backfilled={summary.get('delivery_backfilled')} "
+            f"price_check={summary.get('price_check')} "
+            f"reason={summary.get('reason')}"
+        )
+    except Exception as exc:
+        logger.warning(f"bhavcopy 对账失败（已忽略）: {exc}")
+
+
 def run_full_analysis(
     config: Config,
     args: argparse.Namespace,
@@ -784,6 +838,7 @@ def run_full_analysis(
         )
         _run_auto_backtest(config)
         _run_decision_signal_outcomes(config)
+        _run_bhavcopy_reconciliation(config)
         return True
 
     # Import pipeline modules outside the broad try/except so that import-time
@@ -797,6 +852,7 @@ def run_full_analysis(
     def _return_with_auto_backtest(result: bool) -> bool:
         _run_auto_backtest(config)
         _run_decision_signal_outcomes(config)
+        _run_bhavcopy_reconciliation(config)
         return result
 
     try:
