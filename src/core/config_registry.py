@@ -86,6 +86,10 @@ WEB_SETTINGS_HIDDEN_FROM_UI = {
     # return figure. Kept out of the UI deliberately, not by oversight.
     "DECISION_OUTCOME_DAILY_REFILL_ENABLED",
     "DECISION_OUTCOME_BENCHMARK_ENABLED",
+    # Bhavcopy reconciliation reaches out to NSE and writes quarantine rows for
+    # every disagreement; it is an operator-level switch for the scheduled
+    # environment, edited in .env alongside the refill flag above.
+    "BHAVCOPY_RECONCILIATION_ENABLED",
     "TXN_COST_BROKERAGE_RATE",
     "TXN_COST_BROKERAGE_CAP_INR",
     "TXN_COST_STT_MIS_BUY_RATE",

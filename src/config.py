@@ -1265,6 +1265,10 @@ class Config:
     # 不配置时行为与之前一致，离线测试套件保持离线。在调度环境中开启 ——
     # 绝对收益回答不了"这一笔是否跑赢了它所处的市场"。
     decision_outcome_benchmark_enabled: bool = False
+    # 用 NSE 官方 bhavcopy 对账 stock_daily（比对 OHLCV、回填交割量）。
+    # 默认关闭，因为它要访问 NSE 站点：不配置即保持现有行为，离线测试也不会联网。
+    # 对账只写隔离表并回填缺失的交割量字段，永远不覆盖已存的 K 线。
+    bhavcopy_reconciliation_enabled: bool = False
 
     # === Transaction costs (Stage 07) ===
     # Every rate is a FRACTION of turnover, not a percentage: 0.1% is 0.001.
@@ -2272,6 +2276,9 @@ class Config:
             ),
             decision_outcome_benchmark_enabled=parse_env_bool(
                 os.getenv('DECISION_OUTCOME_BENCHMARK_ENABLED'), False
+            ),
+            bhavcopy_reconciliation_enabled=parse_env_bool(
+                os.getenv('BHAVCOPY_RECONCILIATION_ENABLED'), False
             ),
             txn_cost_brokerage_rate=parse_optional_env_float(os.getenv('TXN_COST_BROKERAGE_RATE')),
             txn_cost_brokerage_cap_inr=parse_optional_env_float(os.getenv('TXN_COST_BROKERAGE_CAP_INR')),
