@@ -1265,6 +1265,10 @@ class Config:
     # 不配置时行为与之前一致，离线测试套件保持离线。在调度环境中开启 ——
     # 绝对收益回答不了"这一笔是否跑赢了它所处的市场"。
     decision_outcome_benchmark_enabled: bool = False
+
+    # NSE bhavcopy 抓取需要访问交易所站点，默认关闭：离线测试永不联网。
+    # 在调度环境开启，供 stock_daily 对账使用。
+    nse_bhavcopy_fetch_enabled: bool = False
     # 用 NSE 官方 bhavcopy 对账 stock_daily（比对 OHLCV、回填交割量）。
     # 默认关闭，因为它要访问 NSE 站点：不配置即保持现有行为，离线测试也不会联网。
     # 对账只写隔离表并回填缺失的交割量字段，永远不覆盖已存的 K 线。
@@ -2279,6 +2283,9 @@ class Config:
             ),
             bhavcopy_reconciliation_enabled=parse_env_bool(
                 os.getenv('BHAVCOPY_RECONCILIATION_ENABLED'), False
+            ),
+            nse_bhavcopy_fetch_enabled=parse_env_bool(
+                os.getenv('NSE_BHAVCOPY_FETCH_ENABLED'), False
             ),
             txn_cost_brokerage_rate=parse_optional_env_float(os.getenv('TXN_COST_BROKERAGE_RATE')),
             txn_cost_brokerage_cap_inr=parse_optional_env_float(os.getenv('TXN_COST_BROKERAGE_CAP_INR')),

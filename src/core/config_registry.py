@@ -90,6 +90,7 @@ WEB_SETTINGS_HIDDEN_FROM_UI = {
     # every disagreement; it is an operator-level switch for the scheduled
     # environment, edited in .env alongside the refill flag above.
     "BHAVCOPY_RECONCILIATION_ENABLED",
+    "NSE_BHAVCOPY_FETCH_ENABLED",
     "TXN_COST_BROKERAGE_RATE",
     "TXN_COST_BROKERAGE_CAP_INR",
     "TXN_COST_STT_MIS_BUY_RATE",
