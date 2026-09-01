@@ -795,7 +795,7 @@ class DecisionSignalService:
         market = self._normalize_market(payload.get("market"))
         stock_code = self._normalize_stock_code(payload.get("stock_code"), market=market)
         action = self._normalize_action(payload.get("action"))
-        report_language = normalize_report_language(payload.get("report_language"))
+        report_language = self._resolve_report_language(payload.get("report_language"))
         action_label = self._optional_public_text(payload.get("action_label"), "action_label", max_length=32)
         if not action_label:
             action_label = localize_action_label(action, report_language)
@@ -1214,6 +1214,32 @@ class DecisionSignalService:
         if isinstance(value, dict):
             return dict(value)
         return {"metadata_replaced_due_to_non_object": True}
+
+    @staticmethod
+    def _resolve_report_language(value: Any) -> str:
+        """Resolve the language a signal's display label is written in.
+
+        ``normalize_report_language(None)`` answers ``zh``, which is the right default for
+        a library function and the wrong one here: a payload that carries no language is
+        not asking for Chinese, it simply did not say. Signals written by the scheduled
+        path do not carry one, so on a deployment configured ``REPORT_LANGUAGE=en`` they
+        were labelled ``买入`` while every CLI-written signal in the same run said ``Buy``.
+        Two such rows are in the database, a fortnight apart (`id=1`, `id=74`), and both
+        were read as a first-day artefact rather than a live defect.
+
+        An unspecified language now means "whatever this deployment is configured to
+        emit". A deployment that has not configured one still gets ``zh``, so this changes
+        nothing for Chinese installations.
+        """
+        if str(value or "").strip():
+            return normalize_report_language(value)
+        try:
+            from src.config import get_config
+
+            configured = getattr(get_config(), "report_language", None)
+        except Exception:  # noqa: BLE001 - a config problem must not fail the write
+            configured = None
+        return normalize_report_language(configured)
 
     def _normalize_plan_quality(self, value: Any, *, fields: Dict[str, Any]) -> str:
         claimed = (
