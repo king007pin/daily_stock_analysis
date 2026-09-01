@@ -878,6 +878,107 @@ def _send_quarantine_alert(summary: Dict[str, Any]) -> None:
         logger.warning(f"bhavcopy 隔离告警发送失败（已忽略）: {exc}")
 
 
+def _format_stale_data_alert(summary: Dict[str, Any]) -> str:
+    """Name the codes, how far behind they are, and which are still being signalled."""
+
+    stale = list(summary.get("stale") or [])
+    signalled = [item for item in stale if item.signalled_while_stale]
+
+    lines = [
+        f"{len(signalled)} of {len(stale)} stale codes are still producing signals "
+        f"(prices older than {summary.get('max_age_days')} days, as of {summary.get('as_of')}).",
+        "A signal priced off a stale bar is indistinguishable from a good one.",
+        "",
+    ]
+    for item in signalled[:QUARANTINE_ALERT_MAX_ROWS]:
+        lines.append(
+            f"- {item.code}: last bar {item.last_bar.isoformat()}, {item.days_behind} days behind, "
+            f"{item.signals_since_last_bar} signal(s) written since"
+        )
+    remaining = len(signalled) - QUARANTINE_ALERT_MAX_ROWS
+    if remaining > 0:
+        lines.append(f"...and {remaining} more not listed here.")
+
+    quiet = [item for item in stale if not item.signalled_while_stale]
+    if quiet:
+        lines.append("")
+        lines.append(
+            "Stale but unsignalled (watchlist entries nothing trades): "
+            + ", ".join(f"{item.code} ({item.days_behind}d)" for item in quiet[:10])
+        )
+    return "\n".join(lines)
+
+
+def _run_stock_data_freshness_check(config: Config) -> None:
+    """Report codes whose prices have quietly stopped updating. Fail-soft.
+
+    A failed fetch does not stop the analysis and leaves no mark. On 2026-09-01 the 08:57
+    run logged ``数据保存成功（新增 0 条）`` for two Indian codes - save succeeded, nothing
+    written - and a third was six bars behind because its primary source could reach no
+    server. All three produced signals that day regardless.
+
+    Alerts only on codes that are **both** stale and still being signalled. A watchlist
+    entry nothing trades can sit at 46 days behind without anyone needing to be woken; a
+    code still emitting signals against week-old prices is a different matter. The rest
+    are named in the log and in the alert body, never in the alert trigger - an alert that
+    fires every day for something nobody will fix trains people to ignore it.
+    """
+
+    try:
+        from datetime import date as _date
+
+        from src.services.stock_data_freshness_service import StockDataFreshnessService
+
+        summary = StockDataFreshnessService().summary(as_of=_date.today())
+        logger.info(
+            f"行情新鲜度检查完成: stale={summary.get('stale_count')} "
+            f"signalled_while_stale={summary.get('signalled_while_stale_count')} "
+            f"max_age_days={summary.get('max_age_days')}"
+        )
+        for item in summary.get("stale") or []:
+            logger.warning(
+                "行情过期: code=%s last_bar=%s days_behind=%s signals_since=%s",
+                item.code,
+                item.last_bar,
+                item.days_behind,
+                item.signals_since_last_bar,
+            )
+
+        if summary.get("signalled_while_stale_count"):
+            _send_stale_data_alert(summary)
+    except Exception as exc:
+        logger.warning(f"行情新鲜度检查失败（已忽略）: {exc}")
+
+
+def _send_stale_data_alert(summary: Dict[str, Any]) -> None:
+    """Tell someone that signals are being written against old prices. Never fail the run."""
+
+    try:
+        from src.notification import NotificationBuilder, NotificationService
+
+        signalled = sorted(
+            item.code for item in (summary.get("stale") or []) if item.signalled_while_stale
+        )
+        alert = NotificationBuilder.build_simple_alert(
+            title=f"Stale prices behind live signals | {summary.get('as_of')}",
+            content=_format_stale_data_alert(summary),
+            alert_type="warning",
+        )
+        delivered = NotificationService().send(
+            alert,
+            route_type="alert",
+            dedup_key=f"stale-prices:{summary.get('as_of')}:{','.join(signalled)}",
+        )
+        if not delivered:
+            logger.warning(
+                "行情过期告警未送达任何渠道: as_of=%s codes=%s",
+                summary.get("as_of"),
+                ",".join(signalled),
+            )
+    except Exception as exc:
+        logger.warning(f"行情过期告警发送失败（已忽略）: {exc}")
+
+
 def _run_bhavcopy_reconciliation(config: Config) -> None:
     """Reconcile stored NSE daily bars against the exchange bhavcopy, fail-soft.
 
@@ -966,6 +1067,7 @@ def run_full_analysis(
         _run_auto_backtest(config)
         _run_decision_signal_outcomes(config)
         _run_bhavcopy_reconciliation(config)
+        _run_stock_data_freshness_check(config)
         return True
 
     # Import pipeline modules outside the broad try/except so that import-time
@@ -980,6 +1082,7 @@ def run_full_analysis(
         _run_auto_backtest(config)
         _run_decision_signal_outcomes(config)
         _run_bhavcopy_reconciliation(config)
+        _run_stock_data_freshness_check(config)
         return result
 
     try:
