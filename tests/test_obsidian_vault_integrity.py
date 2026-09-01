@@ -32,6 +32,51 @@ VAULT_ROOT = os.environ.get(
     "/Users/shubhammac/SSD/Obsidian/Daily Stock Analysis/Daily Stock Analysis",
 )
 SCRIPTS_BRIDGE_DIR = os.path.join(VAULT_ROOT, "06-Scripts-Bridge")
+
+# Vendored third-party source trees: repositories checked out inside the vault so the
+# platform they document sits beside the notes. They are not curated notes, and the fix for
+# any drift they report would be editing someone else's repository.
+#
+# 13-OpenAlgo-Execution-Platform/openalgo alone ships hundreds of markdown files with their
+# own frontmatter and link conventions, plus a virtualenv. On 2026-09-01 it was still being
+# installed while this suite ran, and these checks failed twice for different reasons: 13
+# unresolved wiki-links from another project's notes, then a FileNotFoundError when rglob
+# walked into site-packages that were being written underneath it.
+#
+# Keep in step with VENDORED_DIRS in 06-Scripts-Bridge/test_vault_integrity.py.
+VENDORED_DIRS = (
+    "13-OpenAlgo-Execution-Platform/openalgo",
+)
+
+
+def _walk_curated():
+    """Walk the vault, pruning vendored trees and tool directories as we go.
+
+    Pruning matters more than filtering: a `glob("**/*")` descends into 50 MB of git
+    objects and site-packages before anything can be discarded, which took this file from
+    3 seconds to 173. `os.walk` lets the directories be skipped rather than read.
+    """
+    skip_dirs = {".git", ".venv", "venv", "node_modules", "__pycache__", ".obsidian"}
+    vendored = {os.path.join(VAULT_ROOT, v.replace("/", os.sep)) for v in VENDORED_DIRS}
+
+    for dirpath, dirnames, filenames in os.walk(VAULT_ROOT):
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in skip_dirs and os.path.join(dirpath, d) not in vendored
+        ]
+        for filename in filenames:
+            yield os.path.join(dirpath, filename)
+
+
+def curated_markdown_files():
+    """Every markdown note this vault's own conventions actually govern."""
+    return [path for path in _walk_curated() if path.endswith(".md")]
+
+
+def curated_basenames():
+    """File names a wiki-link may resolve to, vendored trees excluded."""
+    return {os.path.basename(path) for path in _walk_curated()}
 DB_PATH = os.environ.get(
     "DSA_DB_PATH",
     os.path.join(Path(__file__).resolve().parents[1], "data", "stock_analysis.db"),
@@ -184,7 +229,7 @@ class TestMarkdownIntegrityAndCrossLinks:
     """Validates UTF-8 encoding and internal wiki-link references."""
 
     def test_all_vault_markdown_files_are_valid_utf8(self):
-        md_files = glob.glob(os.path.join(VAULT_ROOT, "**", "*.md"), recursive=True)
+        md_files = curated_markdown_files()
         assert len(md_files) > 50, f"Expected >50 markdown notes in vault, found {len(md_files)}"
         for fpath in md_files:
             try:
@@ -194,7 +239,8 @@ class TestMarkdownIntegrityAndCrossLinks:
                 pytest.fail(f"Failed to read markdown file as UTF-8: {fpath} with error: {e}")
 
     def test_internal_wiki_links_resolve_to_existing_files(self):
-        md_files = glob.glob(os.path.join(VAULT_ROOT, "**", "*.md"), recursive=True)
+        md_files = curated_markdown_files()
+        known_basenames = curated_basenames()
         link_pattern = re.compile(r"\[\[([^\]\|]+)(?:\|[^\]]+)?\]\]")
         
         broken_links = []
@@ -214,9 +260,11 @@ class TestMarkdownIntegrityAndCrossLinks:
                 
                 direct_path = os.path.join(VAULT_ROOT, target_with_ext)
                 relative_path = os.path.join(os.path.dirname(fpath), target_with_ext)
-                basename_matches = list(Path(VAULT_ROOT).rglob(os.path.basename(target_with_ext)))
-                
-                if not (os.path.exists(direct_path) or os.path.exists(relative_path) or len(basename_matches) > 0):
+                # A link is not resolved by a file inside a vendored tree, and walking one
+                # while it is being installed raises FileNotFoundError mid-iteration.
+                resolves_by_name = os.path.basename(target_with_ext) in known_basenames
+
+                if not (os.path.exists(direct_path) or os.path.exists(relative_path) or resolves_by_name):
                     broken_links.append((os.path.basename(fpath), target))
                     
         assert len(broken_links) == 0, f"Found {len(broken_links)} broken wiki-links: {broken_links[:10]}"
