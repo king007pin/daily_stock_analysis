@@ -449,6 +449,9 @@ class BhavcopyReconciliationService:
             fresh = [draft for draft in drafts if draft.code not in already]
             summary["quarantine_records_written"] = self.store.write_quarantine(fresh)
             summary["quarantine_records_skipped"] = len(drafts) - len(fresh)
+            # 只描述本次真正写入的分歧，重复运行时为空：调用方据此决定是否告警，
+            # 幂等的第二次运行不应再惊动任何人。
+            summary["quarantine_details"] = [self._draft_detail(draft) for draft in fresh]
 
         if delivery_updates:
             summary["delivery_backfilled"] = self.store.backfill_delivery(trade_date, delivery_updates)
@@ -462,6 +465,25 @@ class BhavcopyReconciliationService:
     # 内部工具
     # ------------------------------------------------------------------
     @staticmethod
+    def _draft_detail(draft: QuarantineDraft) -> Dict[str, Any]:
+        """把一条隔离草稿摊平成调用方可读的字典。
+
+        隔离表本身按“字段”分行（一根 K 线的收盘价和成交量分歧各占一行），
+        计数用于审计；而告警要讲的是“哪只票、存的是多少、交易所说是多少”，
+        所以这里按 K 线返回一条，缺失值保持 ``None``，绝不用 0 顶替——
+        “没有这个数”和“这个数是 0”是两回事。
+        """
+        return {
+            "code": draft.code,
+            "symbol": draft.symbol,
+            "reasons": list(draft.reasons),
+            "stored_close": draft.stored_close,
+            "published_close": draft.published_close,
+            "stored_volume": draft.stored_volume,
+            "published_volume": draft.published_volume,
+        }
+
+    @staticmethod
     def _empty_summary(trade_date: date) -> Dict[str, Any]:
         return {
             "status": STATUS_OK,
@@ -471,6 +493,7 @@ class BhavcopyReconciliationService:
             "agreed": 0,
             "quarantined": 0,
             "quarantine_records_written": 0,
+            "quarantine_details": [],
             "quarantine_records_skipped": 0,
             "delivery_backfilled": 0,
             "missing_in_bhavcopy": [],

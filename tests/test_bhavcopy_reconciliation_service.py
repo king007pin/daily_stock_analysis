@@ -509,3 +509,57 @@ class TestSymbolMappingAndCoverage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestQuarantineDetails(unittest.TestCase):
+    """The summary must describe *which* bars disagreed, not only how many.
+
+    Added 2026-09-01 with the quarantine alert. A count alone tells the reader that
+    something is wrong without telling them what, so the alert would have been
+    unactionable and the reconciliation would still, in effect, be telling nobody.
+    """
+
+    def _disagreeing_setup(self):
+        store = FakeStore({"IDEA.NS": StoredBar(code="IDEA.NS", close=102.0, volume=460_728_374.0)})
+        published = {"IDEA": FakeBhavcopyRow(symbol="IDEA", close=102.0, volume=1_534_470_198.0)}
+        return store, published
+
+    def test_details_name_the_bar_and_both_numbers(self):
+        store, published = self._disagreeing_setup()
+        summary = _service(store, published).reconcile(TRADE_DATE)
+
+        self.assertEqual(summary["quarantined"], 1)
+        details = summary["quarantine_details"]
+        self.assertEqual(len(details), 1)
+        detail = details[0]
+        self.assertEqual(detail["code"], "IDEA.NS")
+        self.assertEqual(detail["symbol"], "IDEA")
+        self.assertIn(REASON_VOLUME_MISMATCH, detail["reasons"])
+        self.assertEqual(detail["stored_volume"], 460_728_374.0)
+        self.assertEqual(detail["published_volume"], 1_534_470_198.0)
+
+    def test_a_repeat_run_reports_no_details(self):
+        """Idempotence has to reach the details too, or the same day alerts twice."""
+        store, published = self._disagreeing_setup()
+        _service(store, published).reconcile(TRADE_DATE)
+        second = _service(store, published).reconcile(TRADE_DATE)
+
+        self.assertEqual(second["quarantined"], 1)
+        self.assertEqual(second["quarantine_records_written"], 0)
+        self.assertEqual(second["quarantine_details"], [])
+
+    def test_missing_values_stay_none(self):
+        """A missing stored volume must not be reported as zero."""
+        store = FakeStore({"IDEA.NS": StoredBar(code="IDEA.NS", close=102.0, volume=None)})
+        published = {"IDEA": FakeBhavcopyRow(symbol="IDEA", close=102.0, volume=1_000_000.0)}
+        summary = _service(store, published).reconcile(TRADE_DATE)
+
+        detail = summary["quarantine_details"][0]
+        self.assertIsNone(detail["stored_volume"])
+        self.assertEqual(detail["published_volume"], 1_000_000.0)
+
+    def test_an_empty_summary_carries_an_empty_detail_list(self):
+        """Callers may read the key unconditionally, on every status."""
+        store = FakeStore()
+        summary = _service(store, {}, enabled=False).reconcile(TRADE_DATE)
+        self.assertEqual(summary["quarantine_details"], [])

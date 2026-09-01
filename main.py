@@ -755,6 +755,129 @@ def _run_decision_signal_outcomes(config: Config) -> None:
         logger.warning(f"决策信号结果评估失败（已忽略）: {exc}")
 
 
+# A quarantine flood means something systemic, and a 200-line message is not how anyone
+# wants to hear it. Cap the detail and say plainly how much was left out - a silently
+# truncated list reads as "that was all of it".
+QUARANTINE_ALERT_MAX_ROWS = 20
+
+
+def _quarantine_amount(value: Optional[float], *, is_price: bool) -> str:
+    """Render a stored/published figure, or say the value is missing.
+
+    ``None`` means the reconciliation found no such value. It is never rendered as 0:
+    "there is no number here" and "the number is zero" are different findings, and the
+    second one would send someone chasing a price crash that did not happen.
+    """
+    if value is None:
+        return "missing"
+    if is_price:
+        return f"{float(value):,.2f}"
+    return f"{float(value):,.0f}"
+
+
+def _quarantine_delta(stored: Optional[float], published: Optional[float]) -> str:
+    """Signed percentage of stored against the exchange, or nothing at all."""
+    if stored is None or not published:
+        return ""
+    delta = (float(stored) - float(published)) / abs(float(published)) * 100.0
+    return f" ({delta:+.1f}%)"
+
+
+def _format_quarantine_alert(summary: Dict[str, Any]) -> str:
+    """Turn a reconciliation summary into an alert someone can act on.
+
+    Names the ticker, both numbers and the gap between them. A message that reported
+    only a count would tell the reader that something is wrong without telling them
+    what, which is the same as telling them nothing.
+    """
+    details = list(summary.get("quarantine_details") or [])
+    rows_written = summary.get("quarantine_records_written") or 0
+    compared = summary.get("compared") or 0
+
+    rows_label = "row" if rows_written == 1 else "rows"
+    lines = [
+        f"Disagreements with NSE's published file: {len(details)} of {compared} reconciled bars "
+        f"({rows_written} quarantine {rows_label} written).",
+        "Stored bars are unchanged - the disagreement is kept as evidence, not applied.",
+        "",
+    ]
+
+    for detail in details[:QUARANTINE_ALERT_MAX_ROWS]:
+        code = detail.get("code") or detail.get("symbol") or "?"
+        reasons = set(detail.get("reasons") or ())
+        if {"volume_mismatch", "stored_volume_missing"} & reasons:
+            stored = detail.get("stored_volume")
+            published = detail.get("published_volume")
+            lines.append(
+                f"- {code} volume: stored {_quarantine_amount(stored, is_price=False)} "
+                f"vs NSE {_quarantine_amount(published, is_price=False)}"
+                f"{_quarantine_delta(stored, published)}"
+            )
+        if {"close_mismatch", "stored_close_missing"} & reasons:
+            stored = detail.get("stored_close")
+            published = detail.get("published_close")
+            lines.append(
+                f"- {code} close: stored {_quarantine_amount(stored, is_price=True)} "
+                f"vs NSE {_quarantine_amount(published, is_price=True)}"
+                f"{_quarantine_delta(stored, published)}"
+            )
+
+    remaining = len(details) - QUARANTINE_ALERT_MAX_ROWS
+    if remaining > 0:
+        lines.append(f"...and {remaining} more bars not listed here.")
+
+    return "\n".join(lines)
+
+
+def _quarantine_dedup_key(summary: Dict[str, Any]) -> str:
+    """Dedup on the trade date *and* which bars disagreed.
+
+    Keying on the date alone would suppress the second alert of a day that found a
+    different set of bars - genuinely new information, silently dropped by the
+    notification layer's own de-duplication.
+    """
+    import hashlib
+
+    fingerprint = ";".join(
+        sorted(
+            f"{detail.get('code')}:{','.join(sorted(detail.get('reasons') or ()))}"
+            for detail in (summary.get("quarantine_details") or [])
+        )
+    )
+    digest = hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()[:12]
+    return f"bhavcopy-quarantine:{summary.get('trade_date')}:{digest}"
+
+
+def _send_quarantine_alert(summary: Dict[str, Any]) -> None:
+    """Tell someone a bar was quarantined. Never fail the run doing it.
+
+    Before this, reconciliation wrote a quarantine row, logged a line and told nobody -
+    the same defect one layer up as a service with no callers. A vendor error nobody
+    is told about is indistinguishable from no vendor error.
+    """
+    try:
+        from src.notification import NotificationBuilder, NotificationService
+
+        alert = NotificationBuilder.build_simple_alert(
+            title=f"Bhavcopy reconciliation | {summary.get('trade_date')}",
+            content=_format_quarantine_alert(summary),
+            alert_type="warning",
+        )
+        delivered = NotificationService().send(
+            alert,
+            route_type="alert",
+            dedup_key=_quarantine_dedup_key(summary),
+        )
+        if not delivered:
+            logger.warning(
+                "bhavcopy 隔离告警未送达任何渠道: trade_date=%s rows=%s",
+                summary.get("trade_date"),
+                summary.get("quarantine_records_written"),
+            )
+    except Exception as exc:
+        logger.warning(f"bhavcopy 隔离告警发送失败（已忽略）: {exc}")
+
+
 def _run_bhavcopy_reconciliation(config: Config) -> None:
     """Reconcile stored NSE daily bars against the exchange bhavcopy, fail-soft.
 
@@ -805,6 +928,10 @@ def _run_bhavcopy_reconciliation(config: Config) -> None:
             f"price_check={summary.get('price_check')} "
             f"reason={summary.get('reason')}"
         )
+        # Alert on rows actually written, never on bars compared: the store dedupes per
+        # trade date, so a second run of the same day writes nothing and must stay quiet.
+        if summary.get("quarantine_records_written"):
+            _send_quarantine_alert(summary)
     except Exception as exc:
         logger.warning(f"bhavcopy 对账失败（已忽略）: {exc}")
 
