@@ -24,6 +24,92 @@ from anyio._backends import _asyncio
 
 T = TypeVar("T")
 
+ISOLATED_ENV_FILE = str(Path(__file__).resolve().parent / "fixtures" / "__absent__.env")
+
+# Every key the developer's real .env defines. Only the names are kept; the values are
+# read and dropped. Absent in CI, where the set is empty and this guard does nothing.
+try:
+    from dotenv import dotenv_values as _dotenv_values
+
+    _REPO_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+    _REPO_ENV_KEYS = frozenset(_dotenv_values(_REPO_ENV_PATH).keys()) if _REPO_ENV_PATH.exists() else frozenset()
+except Exception:  # noqa: BLE001 - never let this break collection
+    _REPO_ENV_KEYS = frozenset()
+
+# What those keys looked like before any test ran. Anything else is leakage.
+_ENV_BASELINE = {key: os.environ.get(key) for key in _REPO_ENV_KEYS}
+
+
+def _reset_config_singleton() -> None:
+    try:
+        from src.config import Config
+
+        Config.reset_instance()
+    except Exception:  # noqa: BLE001 - a broken import must not break every test
+        pass
+
+
+def _repair_missing_env_file() -> None:
+    """Re-isolate ``ENV_FILE`` only when a test left it *unset*.
+
+    Around a dozen files pop it in ``tearDown``/``tearDownClass`` instead of restoring
+    it, and from that point on the config falls back to ``<repo>/.env``. Repairing an
+    absent variable fixes that. Repairing a variable that merely points somewhere else
+    must NOT happen: several classes legitimately set it in ``setUpClass`` and every test
+    in the class then depends on it.
+    """
+    if "ENV_FILE" in os.environ:
+        return
+    os.environ["ENV_FILE"] = ISOLATED_ENV_FILE
+    _reset_config_singleton()
+
+
+def _undo_repo_env_leakage() -> None:
+    """Remove values of the developer's real ``.env`` that a test left in ``os.environ``.
+
+    ``ENV_FILE`` cannot defend against this: the environment outranks it. At least one
+    test loads the repo file straight into the process, and every later test then reads
+    the developer's settings. Run as a post-condition only, so a test that deliberately
+    sets one of these keys for itself is never disturbed mid-test.
+    """
+    repaired = False
+    for key, original in _ENV_BASELINE.items():
+        if os.environ.get(key) == original:
+            continue
+        if original is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = original
+        repaired = True
+    if repaired:
+        _reset_config_singleton()
+
+
+@pytest.fixture(autouse=True)
+def _keep_env_isolated():
+    """Keep the offline suite offline, whatever a test does to the environment.
+
+    Two distinct leaks, repaired at the only points where each can be caught safely:
+
+    * ``ENV_FILE`` popped rather than restored — repaired *before* each test, because the
+      pop can happen in ``tearDownClass``, after the previous test's fixtures have run.
+      Only an absent variable is repaired; a class that sets its own path keeps it.
+    * The repo ``.env`` loaded straight into ``os.environ`` — undone *after* each test,
+      so a test that sets one of those keys on purpose still sees its own value.
+
+    Invisible until 2026-09-01, when three opt-in feature flags were switched on in that
+    ``.env``: the offline suite began fetching benchmark data for every scored signal and
+    ran 12 minutes instead of 210 seconds with nothing failing. A suite that stays green
+    while it quietly goes online reports the wrong thing twice.
+    """
+    _repair_missing_env_file()
+    try:
+        yield
+    finally:
+        _repair_missing_env_file()
+        _undo_repo_env_leakage()
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _isolate_repo_env_file():
     """Stop the offline suite from reading the developer's real ``.env``.
@@ -39,9 +125,7 @@ def _isolate_repo_env_file():
     ``monkeypatch.setenv("ENV_FILE", ...)`` still wins for the duration of a test.
     """
     previous = os.environ.get("ENV_FILE")
-    os.environ["ENV_FILE"] = str(
-        Path(__file__).resolve().parent / "fixtures" / "__absent__.env"
-    )
+    os.environ["ENV_FILE"] = ISOLATED_ENV_FILE
     try:
         yield
     finally:
