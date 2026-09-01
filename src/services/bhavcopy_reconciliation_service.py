@@ -619,11 +619,51 @@ class BhavcopyReconciliationService:
         if price_matcher is not None and published_close is not None:
             if stored_close is None:
                 reasons.append(REASON_STORED_CLOSE_MISSING)
-            elif not price_matcher(stored_close, published_close):
+            elif not self._prices_agree(price_matcher, bar, published_row, stored_close, published_close):
                 reasons.append(REASON_CLOSE_MISMATCH)
         detail["price_check"] = PRICE_CHECK_ENABLED if price_matcher else PRICE_CHECK_UNAVAILABLE
         detail["volume_tolerance_pct"] = self._volume_tolerance_pct
         return reasons, detail
+
+    @staticmethod
+    def _prices_agree(
+        price_matcher: Callable[..., bool],
+        bar: StoredBar,
+        published_row: Any,
+        stored_close: float,
+        published_close: float,
+    ) -> bool:
+        """交给客户端判价，并且**把整根 K 线都交出去**。
+
+        只递收盘价时，客户端无法推断复权因子 k，只能按 k=1 比较——它自己的文档写得很清楚：
+        「an unadjusted dividend will read as a mismatch here」。2026-09-02 全量补跑证实了
+        这一点：58 条 close_mismatch 里，HAL.NS 的 39 条比值恒为 0.99798，TCS.NS 的 19 条
+        恒为 0.99455，成交量分毫不差。恒定比值是分红复权，不是错数据——真正的坏数据不会
+        在两个月里保持同一个比例。
+
+        传入四价之后，客户端从 K 线自身推断 k 并校验四个比值是否一致，分红多大都不需要
+        放宽容差。老签名（只收两个价）继续兼容：拿不到完整比较就退回收盘价比对，
+        而不是把这根 K 线当成没比过。
+        """
+        stored_bar = {
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+            "volume": bar.volume,
+        }
+        try:
+            return bool(
+                price_matcher(
+                    stored_close,
+                    published_close,
+                    stored_bar=stored_bar,
+                    published_bar=published_row,
+                )
+            )
+        except TypeError:
+            # 老的两参数 helper：没有复权感知，但总比不比对强。
+            return bool(price_matcher(stored_close, published_close))
 
     @staticmethod
     def _relative_diff_pct(left: float, right: float) -> float:

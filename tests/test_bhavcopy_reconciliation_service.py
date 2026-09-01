@@ -563,3 +563,110 @@ class TestQuarantineDetails(unittest.TestCase):
         store = FakeStore()
         summary = _service(store, {}, enabled=False).reconcile(TRADE_DATE)
         self.assertEqual(summary["quarantine_details"], [])
+
+
+class TestDividendAdjustedBarsAreNotQuarantined(unittest.TestCase):
+    """A dividend is not a data error, and the full-archive sweep proved it mattered.
+
+    ``stock_daily`` stores dividend-adjusted closes; bhavcopy publishes raw traded prices.
+    Comparing only the two closes cannot tell the difference, so on 2026-09-02 the archive
+    sweep quarantined 58 bars that were perfectly correct: HAL.NS at a constant ratio of
+    0.99798 for 39 sessions and TCS.NS at 0.99455 for 19, with volumes matching exactly. A
+    constant ratio held for two months is a corporate action; corrupt data does not hold a
+    ratio.
+
+    The client can infer the adjustment factor from all four prices, but only if it is
+    given all four. These tests pin that the service hands over the whole bar.
+    """
+
+    def test_a_dividend_adjusted_bar_is_left_alone(self):
+        """The TCS.NS case: every price 0.545% below published, volume identical."""
+        factor = 0.99455
+        published = FakeBhavcopyRow(
+            symbol="TCS", open=2200.0, high=2240.0, low=2190.0, close=2223.0, volume=3_735_188.0
+        )
+        store = FakeStore(
+            {
+                "TCS.NS": StoredBar(
+                    code="TCS.NS",
+                    open=2200.0 * factor,
+                    high=2240.0 * factor,
+                    low=2190.0 * factor,
+                    close=2223.0 * factor,
+                    volume=3_735_188.0,
+                )
+            }
+        )
+
+        def _adjustment_aware(stored_close, published_close, *, stored_bar=None, published_bar=None):
+            """Stand-in for the client's adjustment-aware path: agree on a consistent k."""
+            if stored_bar is None or published_bar is None:
+                return abs(stored_close - published_close) <= 0.01
+            ratios = [
+                stored_bar[field] / getattr(published_bar, field)
+                for field in ("open", "high", "low", "close")
+            ]
+            return max(ratios) - min(ratios) < 1e-6
+
+        summary = _service(store, {"TCS": published}, price_matches=_adjustment_aware).reconcile(TRADE_DATE)
+
+        self.assertEqual(summary["quarantined"], 0, "a dividend-adjusted bar is not a disagreement")
+        self.assertEqual(summary["agreed"], 1)
+
+    def test_the_whole_bar_reaches_the_matcher(self):
+        """Passing only the closes is what produced 58 false quarantines."""
+        seen = {}
+
+        def _capturing(stored_close, published_close, *, stored_bar=None, published_bar=None):
+            seen["stored_bar"] = stored_bar
+            seen["published_bar"] = published_bar
+            return True
+
+        store = FakeStore(
+            {"IDEA.NS": StoredBar(code="IDEA.NS", open=10.0, high=11.0, low=9.5, close=10.5, volume=1_000.0)}
+        )
+        _service(store, {"IDEA": FakeBhavcopyRow(symbol="IDEA", close=10.5, volume=1_000.0)}, price_matches=_capturing).reconcile(
+            TRADE_DATE
+        )
+
+        self.assertIsNotNone(seen["stored_bar"], "the matcher was given no bar to infer k from")
+        self.assertEqual(
+            set(seen["stored_bar"]), {"open", "high", "low", "close", "volume"}
+        )
+        self.assertEqual(seen["stored_bar"]["high"], 11.0)
+        self.assertIsNotNone(seen["published_bar"])
+
+    def test_an_older_two_argument_matcher_still_works(self):
+        """Compatibility: a helper without the keyword arguments must not break the pass."""
+
+        def _legacy(stored_close, published_close):
+            return abs(stored_close - published_close) <= 0.01
+
+        store = FakeStore({"IDEA.NS": StoredBar(code="IDEA.NS", close=10.5, volume=1_000.0)})
+        summary = _service(
+            store, {"IDEA": FakeBhavcopyRow(symbol="IDEA", close=10.5, volume=1_000.0)}, price_matches=_legacy
+        ).reconcile(TRADE_DATE)
+
+        self.assertEqual(summary["quarantined"], 0)
+        self.assertEqual(summary["price_check"], PRICE_CHECK_ENABLED)
+
+    def test_a_real_price_error_is_still_caught(self):
+        """The fix must not turn the price check off - only teach it about adjustments."""
+
+        def _adjustment_aware(stored_close, published_close, *, stored_bar=None, published_bar=None):
+            if stored_bar is None or published_bar is None:
+                return abs(stored_close - published_close) <= 0.01
+            ratios = [
+                stored_bar[field] / getattr(published_bar, field)
+                for field in ("open", "high", "low", "close")
+            ]
+            return max(ratios) - min(ratios) < 1e-6
+
+        published = FakeBhavcopyRow(symbol="IDEA", open=10.0, high=11.0, low=9.5, close=10.5, volume=1_000.0)
+        store = FakeStore(
+            {"IDEA.NS": StoredBar(code="IDEA.NS", open=10.0, high=11.0, low=9.5, close=12.9, volume=1_000.0)}
+        )
+
+        summary = _service(store, {"IDEA": published}, price_matches=_adjustment_aware).reconcile(TRADE_DATE)
+
+        self.assertEqual(summary["quarantined"], 1, "a close that breaks the ratio is a real disagreement")
